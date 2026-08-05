@@ -2341,6 +2341,25 @@ local State = {
     lastHakiToggle = 0,
 }
 
+-- Survive loadstring reloads + allow MCP live tests
+local Persist = rawget(getgenv(), "T3TI_Persist")
+if type(Persist) ~= "table" then
+    Persist = {}
+    getgenv().T3TI_Persist = Persist
+end
+if Persist.autoFarm == true then
+    State.autoFarm = true
+end
+if Persist.autoAccept ~= nil then
+    State.autoAccept = Persist.autoAccept and true or false
+end
+getgenv().T3TI_State = State
+
+local function savePersist()
+    Persist.autoFarm = State.autoFarm and true or false
+    Persist.autoAccept = State.autoAccept and true or false
+end
+
 local function notify(t, b, k)
     UI.Notify(t, b or "", 3, k or "good")
 end
@@ -3573,8 +3592,9 @@ do
         notify("Quests", State.status, ok2 and "good" or "bad")
         refreshPanel()
     end)
-    s1:Toggle("Auto Accept", true, function(v)
+    s1:Toggle("Auto Accept", State.autoAccept, function(v)
         State.autoAccept = v
+        savePersist()
         notify("Auto Accept", v and "ON" or "OFF", v and "good" or "bad")
     end)
     s1:Slider("Interval", 125, 50, 400, "x10ms", function(v)
@@ -3646,8 +3666,9 @@ do
     local tab = win:Tab("Farm")
     local s1 = tab:Section("Auto Farm")
     s1:Label("BV fly + skill remotes (no 1st person)")
-    s1:Toggle("Auto Farm", false, function(v)
+    s1:Toggle("Auto Farm", State.autoFarm, function(v)
         State.autoFarm = v
+        savePersist()
         if not v then
             stopFarmNoclip()
             clearVirtualAim()
@@ -3682,8 +3703,9 @@ do
             notify("Farm", "OS click steals mouse / clicks outside Roblox", "bad")
         end
     end)
-    s1:Toggle("Auto Accept Quest", true, function(v)
+    s1:Toggle("Auto Accept Quest", State.autoAccept, function(v)
         State.autoAccept = v
+        savePersist()
     end)
     s1:Toggle("Auto Buso (J)", true, function(v)
         State.autoBuso = v
@@ -4307,8 +4329,39 @@ local function revealUI()
     end
     refreshPanel()
     UI:PlayUI("open")
-    notify("T3ti", "Haze helper ready — RCtrl menu", "good")
-    print("[T3ti] Haze Seas helper loaded")
+    if State.autoFarm then
+        requestFarmRepath()
+        notify("T3ti", "Auto Farm resumed — RCtrl menu", "good")
+    else
+        notify("T3ti", "Haze helper ready — enable Auto Farm to move", "good")
+    end
+    print("[T3ti] Haze Seas helper loaded · autoFarm=" .. tostring(State.autoFarm))
+end
+
+-- MCP / executor helpers for live tests
+getgenv().T3TI_SetFarm = function(on)
+    State.autoFarm = on and true or false
+    savePersist()
+    if State.autoFarm then
+        requestFarmRepath()
+        task.spawn(function()
+            ensureBestQuest()
+            requestFarmRepath()
+        end)
+    else
+        stopFarmNoclip()
+        clearVirtualAim()
+    end
+    return State.autoFarm
+end
+getgenv().T3TI_Status = function()
+    return {
+        autoFarm = State.autoFarm,
+        autoAccept = State.autoAccept,
+        status = State.status,
+        target = farmTargetName(),
+        quest = currentQuestTarget(),
+    }
 end
 
 if UI.PlayBootIntro and not getgenv().T3TI_NO_INTRO then
