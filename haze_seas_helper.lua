@@ -81,7 +81,7 @@ local State = {
     -- Auto Farm
     autoFarm = false,
     farmSkills = true,
-    farmClick = true,
+    farmClick = false, -- physical mouse1click — keep off so you can use your mouse
     farmMode = "Quest Target", -- or "Selected Enemy"
     farmEnemy = "Holy Soldier",
     farmRange = 25,
@@ -681,19 +681,111 @@ local function findNearestEnemyModel(targetName)
     return best, bestPos, bestDist
 end
 
-local function aimAtWorld(pos)
+--------------------------------------------------------------------
+-- Virtual mouse aim — spoofs Mouse.Hit / GetMouseLocation in-memory.
+-- Does NOT move the OS cursor, so you can freely look / click the UI.
+--------------------------------------------------------------------
+local Aim = {
+    on = false,
+    hit = nil, -- CFrame
+    target = nil, -- Instance?
+    screen = Vector2.new(0, 0),
+    _hooked = false,
+}
+
+local UpdateMousePosition = CE:FindFirstChild("UpdateMousePosition")
+
+local function clearVirtualAim()
+    Aim.on = false
+    Aim.hit = nil
+    Aim.target = nil
+end
+
+local function setVirtualAim(pos, targetInst)
     local cam = workspace.CurrentCamera
     if not cam or typeof(pos) ~= "Vector3" then return false end
-    local screen, onScreen = cam:WorldToViewportPoint(pos)
-    if type(mousemoveabs) == "function" then
-        pcall(mousemoveabs, screen.X, screen.Y)
-        return onScreen
+    local origin = cam.CFrame.Position
+    local dir = pos - origin
+    if dir.Magnitude < 1e-4 then return false end
+    Aim.hit = CFrame.lookAt(pos, pos + dir.Unit)
+    Aim.target = targetInst
+    local sx, sy = cam:WorldToViewportPoint(pos)
+    Aim.screen = Vector2.new(sx, sy)
+    Aim.on = true
+    -- Some games also listen for a mouse-pos remote
+    if UpdateMousePosition and UpdateMousePosition:IsA("RemoteEvent") then
+        pcall(function()
+            UpdateMousePosition:FireServer(pos)
+        end)
     end
-    return false
+    return true
+end
+
+local function installVirtualMouse()
+    if Aim._hooked then return end
+    if type(hookmetamethod) ~= "function" then return end
+    Aim._hooked = true
+
+    local mouse = LP:GetMouse()
+    local oldIndex
+    oldIndex = hookmetamethod(game, "__index", newcclosure and newcclosure(function(self, key)
+        if Aim.on and self == mouse then
+            if key == "Hit" and Aim.hit then return Aim.hit end
+            if key == "Target" then return Aim.target end
+            if key == "HitPosition" and Aim.hit then return Aim.hit.Position end
+            if key == "UnitRay" and Aim.hit then
+                local cam = workspace.CurrentCamera
+                local o = cam and cam.CFrame.Position or Vector3.zero
+                local p = Aim.hit.Position
+                return Ray.new(o, (p - o).Unit * 1000)
+            end
+            if key == "X" then return Aim.screen.X end
+            if key == "Y" then return Aim.screen.Y end
+        end
+        return oldIndex(self, key)
+    end) or function(self, key)
+        if Aim.on and self == mouse then
+            if key == "Hit" and Aim.hit then return Aim.hit end
+            if key == "Target" then return Aim.target end
+            if key == "X" then return Aim.screen.X end
+            if key == "Y" then return Aim.screen.Y end
+        end
+        return oldIndex(self, key)
+    end)
+
+    if type(getnamecallmethod) == "function" then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", newcclosure and newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if Aim.on and not UI.uiVisible and self == UserInputService and method == "GetMouseLocation" then
+                return Aim.screen
+            end
+            return oldNamecall(self, ...)
+        end) or function(self, ...)
+            local method = getnamecallmethod()
+            if Aim.on and not UI.uiVisible and self == UserInputService and method == "GetMouseLocation" then
+                return Aim.screen
+            end
+            return oldNamecall(self, ...)
+        end)
+    end
+end
+
+pcall(installVirtualMouse)
+
+-- Face character at target without touching the OS mouse / camera look.
+local function faceWorld(pos)
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp or typeof(pos) ~= "Vector3" then return end
+    local flat = Vector3.new(pos.X, hrp.Position.Y, pos.Z)
+    if (flat - hrp.Position).Magnitude < 0.05 then return end
+    pcall(function()
+        hrp.CFrame = CFrame.lookAt(hrp.Position, flat)
+    end)
 end
 
 local function farmClick()
-    -- Never spoof M1 while menu is open — it re-clicks toggles/buttons
+    -- Physical OS click — avoid while you want free mouse control
     if UI.uiVisible or UI._booting then
         return false
     end
@@ -708,16 +800,21 @@ local function farmClick()
     return false
 end
 
-local function castFarmSkills()
+local function castFarmSkills(aimPos, aimTarget)
+    if aimPos then
+        setVirtualAim(aimPos, aimTarget)
+        faceWorld(aimPos)
+    end
     if State.useAllSkills then
         local names = skillRemoteNames()
         for _, n in ipairs(names) do
             castSkill(n)
             task.wait(0.05)
         end
-        return
+    else
+        castSkill(State.skillName)
     end
-    castSkill(State.skillName)
+    -- leave Aim.on so brief post-cast scripts still see the hit; cleared when farm off
 end
 
 local _farmNoclipCache = nil
@@ -769,14 +866,11 @@ local function seaRiftPadClear()
     hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(pad.X, hrp.Position.Y, pad.Z))
     task.wait(0.12)
 
-    local cam = workspace.CurrentCamera
-    local screen = cam:WorldToViewportPoint(pad)
-    if type(mousemoveabs) == "function" then
-        pcall(mousemoveabs, screen.X, screen.Y)
-    end
-    task.wait(0.1)
+    setVirtualAim(pad, nil)
+    task.wait(0.05)
 
     local ok, err = castSkill("Sea Rift")
+    clearVirtualAim()
     return ok, err, target, pad, stand
 end
 
@@ -898,20 +992,25 @@ do
         State.autoFarm = v
         if not v then
             stopFarmNoclip()
+            clearVirtualAim()
             State.status = "farm off"
         else
             State.status = "farm on"
-            -- close menu so spoofed M1 can't toggle widgets back off
+            pcall(installVirtualMouse)
+            -- close menu so accidental M1 can't toggle widgets
             UI.uiVisible = false
             pcall(function() UI:PlayUI("close") end)
         end
-        notify("Farm", v and "ON (menu closed)" or "OFF", v and "good" or "bad")
+        notify("Farm", v and "ON (virtual aim)" or "OFF", v and "good" or "bad")
     end)
     s1:Toggle("Skills on Target", true, function(v)
         State.farmSkills = v
     end)
-    s1:Toggle("Spoof M1 Click", true, function(v)
+    s1:Toggle("Physical M1 Click", false, function(v)
         State.farmClick = v
+        if v then
+            notify("Farm", "M1 uses real cursor — leave OFF to free mouse", "bad")
+        end
     end)
     s1:Toggle("Auto Accept Quest", true, function(v)
         State.autoAccept = v
@@ -1047,6 +1146,7 @@ do
         State.autoSkill = false
         State.autoFarm = false
         stopFarmNoclip()
+        clearVirtualAim()
         State.status = "unloaded"
         notify("T3ti", "unloading...", "bad")
         task.defer(function()
@@ -1191,9 +1291,8 @@ refreshPanel()
 --------------------------------------------------------------------
 -- Loops
 --------------------------------------------------------------------
--- Auto Farm: BV to enemy, aim mouse at them, FireServer skills + optional M1.
--- Never locks first-person — NS Hub does that so Mouse.Hit lines up; we spoof
--- cursor with mousemoveabs and fire fruit remotes directly instead.
+-- Auto Farm: BV to enemy, virtual Mouse.Hit aim (no OS cursor move), FireServer skills.
+-- Leave Physical M1 OFF so you can freely use your mouse while it farms.
 task.spawn(function()
     local lastFly = 0
     while UI.alive do
@@ -1225,8 +1324,9 @@ task.spawn(function()
                     if State.autoFarm then
                         npc, pos, dist = findNearestEnemyModel(targetName)
                         if npc and pos then
-                            -- Spoof aim: move OS cursor onto NPC (keeps 3rd person)
-                            aimAtWorld(pos + Vector3.new(0, 2, 0))
+                            local aimPos = pos + Vector3.new(0, 2, 0)
+                            -- keep virtual aim fresh for skill scripts (never moves OS mouse)
+                            setVirtualAim(aimPos, npc)
 
                             local now = tick()
                             if State.farmClick and now - State.lastFarmClick >= 0.12 then
@@ -1235,29 +1335,35 @@ task.spawn(function()
                             end
                             if State.farmSkills and now - State.lastFarmSkill >= (State.farmSkillCd or 1.2) then
                                 State.lastFarmSkill = now
-                                castFarmSkills()
+                                castFarmSkills(aimPos, npc)
                             end
 
                             local hum = npc:FindFirstChildOfClass("Humanoid")
                             local hp = hum and math.floor(hum.Health) or 0
                             State.status = string.format("%s · %dhp · %.0fd", targetName, hp, dist or 0)
                         else
+                            clearVirtualAim()
                             State.status = "no " .. tostring(targetName)
                         end
                     end
                 elseif not targetName then
+                    clearVirtualAim()
                     State.status = "no farm target"
                 else
+                    clearVirtualAim()
                     State.status = "no " .. tostring(targetName)
                 end
             else
+                clearVirtualAim()
                 State.status = "no farm target"
             end
             task.wait(0.08)
         else
+            if Aim.on then clearVirtualAim() end
             task.wait(0.25)
         end
     end
+    clearVirtualAim()
     stopFarmNoclip()
 end)
 
