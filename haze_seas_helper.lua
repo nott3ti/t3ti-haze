@@ -310,9 +310,18 @@ local function acceptQuest(opt)
         return QuestFunction:InvokeServer(opt.giver, opt.key)
     end)
     if not ok then return false, tostring(err) end
-    -- common failure strings
-    if type(err) == "string" and err ~= "" and err:lower():find("already") then
-        return false, err
+    if err == false then
+        return false, "rejected"
+    end
+    if type(err) == "string" and err ~= "" then
+        local low = err:lower()
+        -- AlreadyOnQuest = success for our purposes (do not treat as hard fail)
+        if low:find("already") then
+            return true, "already"
+        end
+        if low:find("fail") or low:find("error") or low:find("cannot") or low:find("can't") then
+            return false, err
+        end
     end
     return true, err
 end
@@ -616,24 +625,80 @@ local function cleanEnemyName(name)
     return m
 end
 
--- Active kill quest only ("Kill 5 Holy Soldiers" -> "Holy Soldier").
--- Do NOT use "Quest: Title" — that's the quest name, not the NPC (and shows even when inactive).
-local function currentQuestTarget()
-    local qg = QuestGui
-    if not qg then return nil end
-    local function clean(m)
-        return cleanEnemyName(m)
+-- Live quest values (text labels often stay stale after turn-in / clear)
+local function questValues()
+    local handler = QuestGui and QuestGui:FindFirstChild("QuestHandler")
+    local q = handler and handler:FindFirstChild("Quest")
+    if not q then return nil end
+    return {
+        name = q:FindFirstChild("QuestName"),
+        objective = q:FindFirstChild("Objective"),
+        progress = q:FindFirstChild("Progress"),
+        target = q:FindFirstChild("Target"),
+    }
+end
+
+-- MainFrame.AmountMobs is the reliable "3/5" progress (QuestHandler values can be blank)
+local function amountMobsProgress()
+    local mf = QuestGui and QuestGui:FindFirstChild("MainFrame")
+    local am = mf and (mf:FindFirstChild("AmountMobs") or mf:FindFirstChild("AmountMobs", true))
+    if not am or not am.Text then return nil, nil end
+    local a, b = tostring(am.Text):match("(%d+)%s*/%s*(%d+)")
+    return tonumber(a), tonumber(b)
+end
+
+local function mainFrameObjectiveText()
+    local mf = QuestGui and QuestGui:FindFirstChild("MainFrame")
+    local obj = mf and mf:FindFirstChild("QuestObjective")
+    return obj and tostring(obj.Text) or nil
+end
+
+local function parseKillTarget(text)
+    local t = tostring(text or "")
+    local m = t:match("[Kk]ill%s+%d+%s+(.+)")
+        or t:match("[Dd]efeat%s+%d+%s+(.+)")
+    return m and cleanEnemyName(m) or nil
+end
+
+-- True only while a kill quest is IN PROGRESS (not empty, not already completed)
+local function hasActiveKillQuest()
+    local prog, need = amountMobsProgress()
+    if need and need > 0 then
+        return (prog or 0) < need
     end
-    for _, d in ipairs(qg:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextButton") then
-            local t = d.Text or ""
-            local m = t:match("[Kk]ill%s+%d+%s+(.+)")
-                or t:match("[Dd]efeat%s+%d+%s+(.+)")
-            if m then
-                return clean(m)
+    local q = questValues()
+    if not q or not q.target then return false end
+    local tneed = tonumber(q.target.Value) or 0
+    if tneed <= 0 then return false end
+    local tprog = q.progress and tonumber(q.progress.Value) or 0
+    if tprog >= tneed then return false end
+    local obj = q.objective and tostring(q.objective.Value) or ""
+    return obj ~= ""
+end
+
+-- Active incomplete kill quest NPC name only.
+local function currentQuestTarget()
+    if not hasActiveKillQuest() then
+        return nil
+    end
+    -- 1) QuestHandler objective value
+    local q = questValues()
+    if q and q.objective and tostring(q.objective.Value) ~= "" then
+        local fromObj = parseKillTarget(q.objective.Value)
+        if fromObj then return fromObj end
+    end
+    -- 2) MainFrame label (works even when values are blank)
+    local fromLabel = parseKillTarget(mainFrameObjectiveText())
+    if fromLabel then return fromLabel end
+    if QuestGui then
+        for _, d in ipairs(QuestGui:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                local hit = parseKillTarget(d.Text)
+                if hit then return hit end
             end
         end
     end
+    return nil
 end
 
 local function gameAutoQuestEnabled()
@@ -657,7 +722,7 @@ local function disableGameAutoQuest()
         pcall(function()
             ToggleAutoQuest:FireServer()
         end)
-        task.wait(0.2)
+        task.wait(0.15)
     end
 end
 
@@ -670,16 +735,22 @@ local function ensureBestQuest()
     end
     local want = cleanEnemyName(best.target) or best.key
     local active = currentQuestTarget()
-    -- Game AutoQuest often locks low-level trash (Bandit) at high level — replace it
+    -- Already on the right incomplete quest
     if active and tostring(active):lower() == tostring(want):lower() then
         return true, active
     end
+    -- No quest / wrong quest / completed → accept best for level
     local ok, err = acceptQuest(best)
     if ok then
         requestFarmRepath()
+        State.status = "accepted · " .. tostring(want)
         return true, want
     end
-    -- accept failed but we still have something
+    -- Server "AlreadyOnQuest" with blank values — trust label target
+    if type(err) == "string" and tostring(err):lower():find("already") then
+        local labelTarget = parseKillTarget(mainFrameObjectiveText()) or active or want
+        return true, labelTarget
+    end
     if active then
         return true, active
     end
@@ -1791,6 +1862,8 @@ do
         State.autoFruit = false
         State.autoSkill = false
         State.autoFarm = false
+        -- keep Auto Accept preference; only clear farm resume
+        Persist.autoFarm = false
         stopFarmNoclip()
         clearVirtualAim()
         State.status = "unloaded"
@@ -2181,14 +2254,17 @@ task.spawn(function()
         local now = tick()
         if State.autoAccept and now - State.lastAccept >= State.acceptInterval then
             State.lastAccept = now
+            local before = currentQuestTarget()
             local ok, info = ensureBestQuest()
-            if ok and type(info) == "string" then
-                -- only refresh status when we actually changed something meaningful
-                if State.status == "ready" or tostring(State.status):find("quest") or tostring(State.status):find("auto") then
-                    State.status = "quest · " .. info
-                end
-            elseif type(info) == "string" and info ~= "" and not tostring(info):lower():find("already") then
-                -- keep quiet on routine failures
+            local after = currentQuestTarget()
+            if ok and after and after ~= before then
+                State.status = "accepted · " .. tostring(after)
+                pcall(refreshPanel)
+                notify("Quest", "accepted · " .. tostring(after), "good")
+            elseif ok and after and (State.status == "ready" or tostring(State.status):find("quest") or tostring(State.status):find("accept")) then
+                State.status = "quest · " .. tostring(after)
+            elseif not ok and type(info) == "string" and info ~= "" and not tostring(info):lower():find("already") then
+                State.status = "accept? · " .. tostring(info):sub(1, 28)
             end
         end
         if State.autoFruit and now - State.lastFruit >= 2 then
