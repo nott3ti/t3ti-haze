@@ -1774,15 +1774,15 @@ S.curDot.NumSides = 12
 local _sysCursorPrev = nil
 
 local function setSystemCursor(hidden)
-    if not S.hideSystemCursor then return end
     pcall(function()
-        if hidden then
+        if hidden and S.hideSystemCursor then
             if _sysCursorPrev == nil then
                 _sysCursorPrev = UserInputService.MouseIconEnabled
             end
             UserInputService.MouseIconEnabled = false
-        elseif _sysCursorPrev ~= nil then
-            UserInputService.MouseIconEnabled = _sysCursorPrev
+        else
+            -- always restore a visible cursor when custom cursor is off
+            UserInputService.MouseIconEnabled = true
             _sysCursorPrev = nil
         end
     end)
@@ -2211,11 +2211,16 @@ end)
 
 local UI = (_G.T3TI_UI or _G.SEIM_UI)
 assert(UI and UI.Window and UI.PlayBootIntro, '[T3ti] UI incomplete')
-UI.showCursor = true
-UI.hideSystemCursor = true
+UI.showCursor = false
+UI.hideSystemCursor = false
 UI.watermark = game.Players.LocalPlayer.Name
 UI.showWatermark = true
 pcall(function() UI:SetFont("UI") end)
+pcall(function()
+    local UIS = game:GetService("UserInputService")
+    UIS.MouseIconEnabled = true
+    UIS.MouseBehavior = Enum.MouseBehavior.Default
+end)
 
 --------------------------------------------------------------------
 -- Services / refs
@@ -3513,8 +3518,14 @@ do
     end)
     kb.allowNil = false -- Esc cancels, does not wipe menu key
 
-    s1:Toggle("Custom Cursor", true, function(v)
+    s1:Toggle("Custom Cursor", false, function(v)
         UI.showCursor = v
+        UI.hideSystemCursor = v
+        if not v then
+            pcall(function()
+                UserInputService.MouseIconEnabled = true
+            end)
+        end
     end)
     s1:Toggle("Fancy UI", true, function(v)
         UI.fx = v

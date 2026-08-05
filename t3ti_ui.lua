@@ -1773,15 +1773,15 @@ S.curDot.NumSides = 12
 local _sysCursorPrev = nil
 
 local function setSystemCursor(hidden)
-    if not S.hideSystemCursor then return end
     pcall(function()
-        if hidden then
+        if hidden and S.hideSystemCursor then
             if _sysCursorPrev == nil then
                 _sysCursorPrev = UserInputService.MouseIconEnabled
             end
             UserInputService.MouseIconEnabled = false
-        elseif _sysCursorPrev ~= nil then
-            UserInputService.MouseIconEnabled = _sysCursorPrev
+        else
+            -- always restore a visible cursor when custom cursor is off
+            UserInputService.MouseIconEnabled = true
             _sysCursorPrev = nil
         end
     end)

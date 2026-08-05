@@ -39,11 +39,16 @@ local function loadUI()
 end
 
 local UI = loadUI()
-UI.showCursor = true
-UI.hideSystemCursor = true
+UI.showCursor = false
+UI.hideSystemCursor = false
 UI.watermark = game.Players.LocalPlayer.Name
 UI.showWatermark = true
 pcall(function() UI:SetFont("UI") end)
+pcall(function()
+    local UIS = game:GetService("UserInputService")
+    UIS.MouseIconEnabled = true
+    UIS.MouseBehavior = Enum.MouseBehavior.Default
+end)
 
 --------------------------------------------------------------------
 -- Services / refs
@@ -1341,8 +1346,14 @@ do
     end)
     kb.allowNil = false -- Esc cancels, does not wipe menu key
 
-    s1:Toggle("Custom Cursor", true, function(v)
+    s1:Toggle("Custom Cursor", false, function(v)
         UI.showCursor = v
+        UI.hideSystemCursor = v
+        if not v then
+            pcall(function()
+                UserInputService.MouseIconEnabled = true
+            end)
+        end
     end)
     s1:Toggle("Fancy UI", true, function(v)
         UI.fx = v
