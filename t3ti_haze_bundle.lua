@@ -2593,13 +2593,15 @@ local function questKillStand(targetName)
     return nil, "no NPCs/pads for " .. targetName
 end
 
--- Heartbeat CFrame fly â€” BodyVelocity is ignored by this game; small CFrame
--- steps stick (tested). No Anchor (that rubberbands).
+-- Walk to quest NPC with PathfindingService (server-accepted).
+-- Client CFrame/BodyVelocity "tweens" only look like they move â€” server
+-- keeps old position and rubberbands you the moment you walk.
 local _questFlyToken = 0
 local function slowTweenToQuestTarget()
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false, "no character" end
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return false, "no character" end
 
     local stand, countOrErr, targetName, kind, dist0 = questKillStand()
     if not stand then return false, countOrErr end
@@ -2607,38 +2609,111 @@ local function slowTweenToQuestTarget()
     _questFlyToken += 1
     local token = _questFlyToken
 
-    -- remove leftover movers from older builds
+    -- strip leftover fake-fly movers from older builds
     for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro" }) do
         local old = hrp:FindFirstChild(n)
         if old then pcall(function() old:Destroy() end) end
     end
 
-    local speed = 45 -- studs/s
-    local arrive = 12
-    local t0 = tick()
-    local maxT = math.clamp((dist0 or 200) / speed + 8, 10, 45)
-    local okArrive = false
-
-    while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
-        local pos = hrp.Position
-        local delta = stand - pos
-        local dist = delta.Magnitude
-        if dist <= arrive then
-            okArrive = true
-            break
+    -- If we're nowhere near the island, use the game's own spawn warp first
+    if (dist0 or 0) > 450 then
+        local spawn = matchSpawn("Skypiean islands")
+            or matchSpawn("Skypeia")
+            or matchSpawn("Sky")
+        if spawn then
+            local okWarp = warpTo(spawn)
+            if not okWarp then
+                return false, "warp failed Â· " .. tostring(spawn)
+            end
+            task.wait(1.2)
+            char = LP.Character
+            hrp = char and char:FindFirstChild("HumanoidRootPart")
+            hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum then return false, "no character after warp" end
+            -- refresh target after warp
+            stand, countOrErr, targetName, kind, dist0 = questKillStand(targetName)
+            if not stand then return false, countOrErr end
         end
-        local dt = RunService.Heartbeat:Wait()
-        if token ~= _questFlyToken or not hrp.Parent then break end
-        local step = math.min(speed * math.max(dt, 1 / 120), dist)
-        local nxt = pos + delta.Unit * step
-        hrp.CFrame = CFrame.lookAt(nxt, Vector3.new(stand.X, nxt.Y, stand.Z))
     end
 
-    if token ~= _questFlyToken then
-        return false, "cancelled"
+    local PFS = game:GetService("PathfindingService")
+    local path = PFS:CreatePath({
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        AgentCanClimb = true,
+    })
+
+    local goal = stand - Vector3.new(0, 5, 0) -- NPC feet-ish (stand was +5)
+    -- keep goal near ground height of NPC
+    local okCompute = pcall(function()
+        path:ComputeAsync(hrp.Position, goal)
+    end)
+    if not okCompute or path.Status ~= Enum.PathStatus.Success then
+        -- fallback: straight MoveTo
+        hum:MoveTo(goal)
+        local done = false
+        local c
+        c = hum.MoveToFinished:Connect(function()
+            done = true
+        end)
+        local t0 = tick()
+        while token == _questFlyToken and UI.alive and not done and (tick() - t0) < 20 do
+            task.wait(0.1)
+        end
+        if c then c:Disconnect() end
+        hum:MoveTo(hrp.Position)
+        local dist = (hrp.Position - goal).Magnitude
+        if dist > 20 then
+            return false, "no path Â· " .. tostring(kind)
+        end
+        return true, string.format("%s Â· MoveTo Â· %s Â· %.0f studs", tostring(targetName), tostring(kind), dist0 or 0)
     end
-    if not okArrive then
-        return false, "timeout Â· " .. tostring(kind)
+
+    local t0 = tick()
+    local waypoints = path:GetWaypoints()
+    for i, wp in ipairs(waypoints) do
+        if token ~= _questFlyToken or not UI.alive or not hrp.Parent then
+            return false, "cancelled"
+        end
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            hum.Jump = true
+        end
+        hum:MoveTo(wp.Position)
+        local done = false
+        local c
+        c = hum.MoveToFinished:Connect(function()
+            done = true
+        end)
+        local w0 = tick()
+        while not done and (tick() - w0) < 5 do
+            if token ~= _questFlyToken or not UI.alive then
+                if c then c:Disconnect() end
+                hum:MoveTo(hrp.Position)
+                return false, "cancelled"
+            end
+            -- already close enough to NPC
+            if (hrp.Position - goal).Magnitude <= 14 then
+                if c then c:Disconnect() end
+                hum:MoveTo(hrp.Position)
+                return true, string.format(
+                    "%s Â· %.1fs Â· %s Â· %.0f studs",
+                    tostring(targetName),
+                    tick() - t0,
+                    tostring(kind),
+                    dist0 or 0
+                )
+            end
+            task.wait(0.05)
+        end
+        if c then c:Disconnect() end
+    end
+
+    hum:MoveTo(hrp.Position)
+    task.wait(0.35) -- let server settle; detect soft rubberband
+    local settle = (hrp.Position - goal).Magnitude
+    if settle > 35 then
+        return false, "server rejected move Â· try again"
     end
 
     return true, string.format(
@@ -2796,11 +2871,11 @@ do
         notify("Travel", ok and "home" or tostring(err), ok and "good" or "bad")
     end)
 
-    local s2 = tab:Section("Tween")
-    s2:Label("CFrame fly â†’ nearest quest NPC")
-    s2:Button("Slow Tween â†’ Quest Target", function()
+    local s2 = tab:Section("Travel to Quest")
+    s2:Label("Pathfind walk â†’ nearest quest NPC")
+    s2:Button("Go to Quest Target", function()
         local t = currentQuestTarget()
-        notify("Travel", t and ("fly â†’ " .. t) or "no kill quest", t and "good" or "bad")
+        notify("Travel", t and ("path â†’ " .. t) or "no kill quest", t and "good" or "bad")
         if not t then return end
         task.spawn(function()
             local ok, info = slowTweenToQuestTarget()
