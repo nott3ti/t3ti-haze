@@ -692,7 +692,15 @@ local function aimAtWorld(pos)
 end
 
 local function farmClick()
+    -- Never spoof M1 while menu is open — it re-clicks toggles/buttons
+    if UI.uiVisible or UI._booting then
+        return false
+    end
+    if UI._ignoreClickUntil and tick() < UI._ignoreClickUntil then
+        return false
+    end
     if type(mouse1click) == "function" then
+        UI._ignoreClickUntil = tick() + 0.08
         pcall(mouse1click)
         return true
     end
@@ -891,8 +899,11 @@ do
             State.status = "farm off"
         else
             State.status = "farm on"
+            -- close menu so spoofed M1 can't toggle widgets back off
+            UI.uiVisible = false
+            pcall(function() UI:PlayUI("close") end)
         end
-        notify("Farm", v and "ON" or "OFF", v and "good" or "bad")
+        notify("Farm", v and "ON (menu closed)" or "OFF", v and "good" or "bad")
     end)
     s1:Toggle("Skills on Target", true, function(v)
         State.farmSkills = v

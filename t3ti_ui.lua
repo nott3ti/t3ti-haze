@@ -1286,6 +1286,9 @@ end
 
 function Window:handleInput()
     if not self.visible then return false end
+    if S._ignoreClickUntil and tick() < S._ignoreClickUntil then
+        return false
+    end
     local mx, my = M.x, M.y
     local used = false
 
@@ -1577,6 +1580,9 @@ end
 
 function Panel:handleInput()
     if not self.visible or self.want == false then return false end
+    if S._ignoreClickUntil and tick() < S._ignoreClickUntil then
+        return false
+    end
     local mx, my = M.x, M.y
     if self.dragging then
         if M.down then
