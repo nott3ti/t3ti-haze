@@ -262,6 +262,12 @@ local function acceptQuest(opt)
     return true, err
 end
 
+-- Set by accept / farm when we need an immediate repath (don't wait for distance gates)
+local _forceFarmRepath = false
+local function requestFarmRepath()
+    _forceFarmRepath = true
+end
+
 local function spawnNames()
     local names = {}
     local root = workspace:FindFirstChild("Npc_Workspace")
@@ -583,6 +589,9 @@ local function ensureBestQuest()
     local best = bestQuest()
     if not best then return false, "no quest for level" end
     local ok, err = acceptQuest(best)
+    if ok then
+        requestFarmRepath()
+    end
     return ok, ok and (cleanEnemyName(best.target) or best.key) or err
 end
 
@@ -1003,16 +1012,15 @@ local function farmHoldAt(goal, lookAt)
 
     local delta = goal - hrp.Position
     local dist = delta.Magnitude
-    if dist < 1.25 then
-        -- lock dead still
+    if dist < 1.5 then
+        -- stay still — do NOT CFrame-snap every frame (fights server → freeze)
         bv.Velocity = Vector3.zero
         pcall(function()
             hrp.AssemblyLinearVelocity = Vector3.zero
-            hrp.CFrame = CFrame.new(goal)
         end)
-    elseif dist < 6 then
+    elseif dist < 8 then
         -- soft correct — no flinging
-        local spd = math.clamp(dist * 10, 18, 90)
+        local spd = math.clamp(dist * 12, 24, 110)
         bv.Velocity = delta.Unit * spd
         pcall(function()
             hrp.AssemblyLinearVelocity = delta.Unit * spd
@@ -1463,11 +1471,13 @@ do
             State.status = "farm off"
         else
             State.status = "farm on"
+            requestFarmRepath()
             pcall(installVirtualMouse)
             -- no active kill quest → accept best for your level (Holy Soldier @ ~1050)
             task.spawn(function()
                 local ok, info = ensureBestQuest()
                 State.status = ok and ("quest · " .. tostring(info)) or ("quest? · " .. tostring(info))
+                requestFarmRepath()
                 pcall(refreshPanel)
                 notify("Quest", tostring(info), ok and "good" or "bad")
             end)
@@ -1861,10 +1871,12 @@ local function farmStandPos(npcPos, npc, fromPos)
 end
 
 local function resolveFarmTarget(targetName, hrp)
-    -- Stick to the same NPC until dead / too far — stops hopping between spawns
+    -- Stick to the same NPC until dead / too far — but ONLY if it still matches the quest
     if _farmLockNpc and _farmLockNpc.Parent then
+        local keys = questTargetKeys(targetName)
         local hum = _farmLockNpc:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 then
+        local nameOk = npcNameMatches(_farmLockNpc.Name, keys)
+        if hum and hum.Health > 0 and nameOk then
             local ok, piv = pcall(function()
                 return _farmLockNpc:GetPivot().Position
             end)
@@ -1895,14 +1907,18 @@ task.spawn(function()
                     local dy = hrp.Position.Y - pos.Y
                     local standDist = (hrp.Position - stand).Magnitude
 
-                    -- Only full repath when FAR. Micro errors = hold, not fly.
-                    local needFly = standDist > 28 or fdist > (melee + 14) or math.abs(dy) > 18
-                    if needFly and tick() - lastFly > 1.4 then
+                    -- Repath when far OR after a new quest accept. Close = hold only.
+                    local needFly = _forceFarmRepath
+                        or standDist > 16
+                        or fdist > (melee + 8)
+                        or math.abs(dy) > 12
+                    if needFly and tick() - lastFly > 0.8 then
                         lastFly = tick()
+                        _forceFarmRepath = false
                         State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
                         local ok, _, cache = bvFlyTo(stand, {
-                            speed = 650,
-                            arrive = math.max(4, melee * 0.55),
+                            speed = 700,
+                            arrive = math.max(3.5, melee * 0.45),
                             keepNoclip = true,
                             cancel = function()
                                 return not State.autoFarm or not UI.alive
@@ -1958,12 +1974,29 @@ task.spawn(function()
                     -- No live NPC yet: fly to pad once, then HOLD still and wait.
                     clearVirtualAim()
                     local waitStand, err, _, kind, dist0 = questKillStand(targetName)
-                    if waitStand then
+                    if not waitStand then
+                        -- No pads either — warp to quest island so we aren't frozen
+                        local best = bestQuest()
+                        local spawn = best and matchSpawn(best.location)
+                        if spawn and tick() - lastFly > 2.5 then
+                            lastFly = tick()
+                            State.status = "warp · " .. tostring(spawn)
+                            pcall(function()
+                                warpTo(spawn)
+                            end)
+                            requestFarmRepath()
+                            task.wait(1.0)
+                        else
+                            stopFarmHold()
+                            State.status = "no " .. tostring(targetName)
+                        end
+                    elseif waitStand then
                         local wf = flatDist(hrp.Position, waitStand)
                         local dy = hrp.Position.Y - waitStand.Y
-                        if wf > 20 or math.abs(dy) > 25 then
-                            if tick() - lastFly > 1.2 then
+                        if _forceFarmRepath or wf > 16 or math.abs(dy) > 20 then
+                            if tick() - lastFly > 0.9 then
                                 lastFly = tick()
+                                _forceFarmRepath = false
                                 State.status = string.format(
                                     "goto · %s · %.0fd",
                                     tostring(kind or "pad"),
@@ -1971,7 +2004,7 @@ task.spawn(function()
                                 )
                                 local ok, _, cache = bvFlyTo(waitStand, {
                                     speed = 700,
-                                    arrive = 14,
+                                    arrive = 12,
                                     keepNoclip = true,
                                     cancel = function()
                                         return not State.autoFarm or not UI.alive
@@ -1992,9 +2025,6 @@ task.spawn(function()
                                 tostring(kind or "pad")
                             )
                         end
-                    else
-                        stopFarmHold()
-                        State.status = "no " .. tostring(targetName)
                     end
                 end
             elseif not targetName then
@@ -2032,14 +2062,21 @@ task.spawn(function()
         local now = tick()
         if State.autoAccept and now - State.lastAccept >= State.acceptInterval then
             State.lastAccept = now
-            local best = bestQuest()
-            if best then
-                local ok, err = acceptQuest(best)
-                if ok then
-                    State.status = "auto " .. best.key
-                    refreshPanel()
-                elseif type(err) == "string" and err ~= "" and not tostring(err):lower():find("already") then
-                    State.status = tostring(err):sub(1, 40)
+            -- Don't spam InvokeServer if a kill quest is already active — that softlocks movement
+            local active = currentQuestTarget()
+            if not active then
+                local best = bestQuest()
+                if best then
+                    local ok, err = acceptQuest(best)
+                    if ok then
+                        clearFarmLock()
+                        requestFarmRepath()
+                        State.status = "auto " .. best.key
+                        refreshPanel()
+                        notify("Quest", "accepted · " .. tostring(cleanEnemyName(best.target) or best.key), "good")
+                    elseif type(err) == "string" and err ~= "" and not tostring(err):lower():find("already") then
+                        State.status = tostring(err):sub(1, 40)
+                    end
                 end
             end
         end
