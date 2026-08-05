@@ -70,7 +70,7 @@ local State = {
     autoAccept = true, -- keep best quest for your level accepted
     autoFruit = false,
     autoSkill = false,
-    skillName = "Sea Rift",
+    skillName = "Ground Flicker",
     skillCd = 3,
     lastSkill = 0,
     lastAccept = 0,
@@ -89,7 +89,7 @@ local State = {
     lastFarmSkill = 0,
     lastFarmClick = 0,
     farmHeight = 8,
-    useAllSkills = false,
+    useAllSkills = true, -- Sea Rift alone often 0 dmg on Divine; rotate fruit skills
 }
 
 local function notify(t, b, k)
@@ -429,10 +429,10 @@ local function safeStandForPad(pad, targetName)
     return pad + Vector3.new(-220, 150, 80)
 end
 
--- Name aliases when quest text ≠ live NPC name (e.g. Holy vs Divine)
+-- Name aliases. Holy Soldier ≠ Divine Soldier (different pads/heights).
+-- Only alias when names are truly interchangeable.
 local QUEST_NPC_ALIASES = {
-    ["holy soldier"] = { "holy soldier", "divine soldier" },
-    ["divine soldier"] = { "holy soldier", "divine soldier" },
+    -- none for holy/divine — keep them separate
 }
 
 local function questTargetKeys(targetName)
@@ -445,7 +445,8 @@ local function npcNameMatches(instName, keys)
     local n = tostring(instName or ""):lower()
     n = n:gsub("%d+$", ""):gsub("%s+$", "")
     for _, k in ipairs(keys) do
-        if n == k or n:find(k, 1, true) or k:find(n, 1, true) then
+        -- exact / contains key only — avoid k:find(n) which lets "soldier" match everything
+        if n == k or n:find(k, 1, true) then
             return true
         end
     end
@@ -470,9 +471,8 @@ end
 
 --[[
   Pick stand for current kill quest.
-  Prefer nearest LIVE npc (Holy quest often has Divine Soldier models nearby).
-  Pad fallback uses NEAREST pad to you across aliases — never average / never
-  the far upper Holy pads when Divine pads are next to you (that rubberbands).
+  Prefer nearest LIVE npc matching the quest name exactly (Holy ≠ Divine).
+  Else nearest ObservationHaki pad for that name (Holy pads sit higher on Sky Islands).
 ]]
 local function questKillStand(targetName)
     targetName = targetName or currentQuestTarget()
@@ -514,7 +514,6 @@ local function questKillStand(targetName)
     end
 
     if nearest then
-        -- stand a bit above / offset so we don't clip into the NPC
         local stand = nearest + Vector3.new(0, 5, 0)
         return stand, count, targetName, "npc:" .. tostring(hitName), nearestDist
     end
@@ -529,7 +528,7 @@ local function questKillStand(targetName)
         end
     end
     if bestPad then
-        return bestPad.pos + Vector3.new(0, 6, 0), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
+        return bestPad.pos + Vector3.new(0, 8, 0), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
     end
 
     return nil, "no NPCs/pads for " .. targetName
