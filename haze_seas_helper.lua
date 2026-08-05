@@ -70,6 +70,59 @@ local TeleportToHome = CE:WaitForChild("TeleportToHome")
 local StatsEvent = CE:FindFirstChild("Stats_Event")
 local SkillUsed = CE:FindFirstChild("SkillUsed")
 local ToggleAutoQuest = CE:FindFirstChild("ToggleAutoQuest")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local function readAbilityKey(bindName, fallback)
+    local ok, keyName = pcall(function()
+        local kb = PD:FindFirstChild("Settings")
+        kb = kb and kb:FindFirstChild("Keybinds")
+        kb = kb and kb:FindFirstChild("PC")
+        kb = kb and kb:FindFirstChild("Ability")
+        local v = kb and kb:FindFirstChild(bindName)
+        return v and tostring(v.Value) or nil
+    end)
+    local name = (ok and keyName and keyName ~= "" and keyName) or fallback
+    local kc = Enum.KeyCode[name]
+    return kc or Enum.KeyCode[fallback]
+end
+
+local function pressAbilityKey(keyCode)
+    if not keyCode then return false end
+    local ok = pcall(function()
+        VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+        task.wait(0.04)
+        VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+    end)
+    return ok
+end
+
+local function charHakiFlags(char)
+    char = char or LP.Character
+    if not char then return nil end
+    return {
+        buso = char:FindFirstChild("BusoEnabled"),
+        obs = char:FindFirstChild("ObservationHaki"),
+        haki = char:FindFirstChild("Haki"),
+    }
+end
+
+local function ensureAutoHaki()
+    if not (State.autoBuso or State.autoHaki) then return end
+    if tick() - (State.lastHakiToggle or 0) < 0.85 then return end
+    local flags = charHakiFlags()
+    if not flags then return end
+
+    if State.autoBuso and flags.buso and flags.buso.Value ~= true then
+        State.lastHakiToggle = tick()
+        pressAbilityKey(readAbilityKey("HakiBuso", "J"))
+        return
+    end
+    if State.autoHaki and flags.obs and flags.obs.Value ~= true then
+        State.lastHakiToggle = tick()
+        pressAbilityKey(readAbilityKey("HakiObs", "K"))
+        return
+    end
+end
 
 local State = {
     autoAccept = true, -- keep best quest for your level accepted
@@ -99,6 +152,10 @@ local State = {
     farmHeight = 1.5,
     skillEnabled = {},
     m1Tool = "Auto",
+    -- Auto Haki / Buso (keybinds from Settings; default J buso / K obs)
+    autoBuso = true,
+    autoHaki = true, -- Observation Haki
+    lastHakiToggle = 0,
 }
 
 local function notify(t, b, k)
@@ -902,24 +959,25 @@ local function bvFlyTo(goal, opts)
     return settle <= 50, settle <= 50 and "ok" or "rubberband", collCache
 end
 
--- Keep floating at combat stand (noclip without hold = fall through island)
+-- Keep floating at a FIXED combat stand (stiff — no orbit / chase)
 local function farmHoldAt(goal, lookAt)
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or typeof(goal) ~= "Vector3" then return end
 
-    -- never hold in the sky above the combat stand / look target
-    local ceilY = goal.Y + 8
+    -- kill travel movers so they don't fight the hold
+    for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro" }) do
+        local o = hrp:FindFirstChild(n)
+        if o then pcall(function() o:Destroy() end) end
+    end
+
+    local ceilY = goal.Y + 6
     if typeof(lookAt) == "Vector3" then
-        ceilY = math.min(ceilY, lookAt.Y + 10)
+        ceilY = math.min(ceilY, lookAt.Y + 8)
     end
     if goal.Y > ceilY then
         goal = Vector3.new(goal.X, ceilY, goal.Z)
-    end
-    if hrp.Position.Y > ceilY + 15 then
-        -- snap pull down instead of floating forever
-        goal = Vector3.new(goal.X, goal.Y, goal.Z)
     end
 
     _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
@@ -930,7 +988,7 @@ local function farmHoldAt(goal, lookAt)
         bv = Instance.new("BodyVelocity")
         bv.Name = "T3tiFarmHold"
         bv.MaxForce = Vector3.new(1, 1, 1) * 4e10
-        bv.P = 35000
+        bv.P = 50000
         bv.Parent = hrp
     end
     local bg = hrp:FindFirstChild("T3tiFarmGyro")
@@ -938,27 +996,40 @@ local function farmHoldAt(goal, lookAt)
         bg = Instance.new("BodyGyro")
         bg.Name = "T3tiFarmGyro"
         bg.MaxTorque = Vector3.new(1, 1, 1) * 4e10
-        bg.P = 20000
-        bg.D = 600
+        bg.P = 30000
+        bg.D = 900
         bg.Parent = hrp
     end
+
     local delta = goal - hrp.Position
     local dist = delta.Magnitude
-    if dist < 1.5 then
+    if dist < 1.25 then
+        -- lock dead still
         bv.Velocity = Vector3.zero
         pcall(function()
             hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.CFrame = CFrame.new(goal)
         end)
+    elseif dist < 6 then
+        -- soft correct — no flinging
+        local spd = math.clamp(dist * 10, 18, 90)
+        bv.Velocity = delta.Unit * spd
+        pcall(function()
+            hrp.AssemblyLinearVelocity = delta.Unit * spd
+        end)
+    elseif hrp.Position.Y > goal.Y + 14 then
+        local spd = math.clamp(dist * 22, 120, 550)
+        bv.Velocity = delta.Unit * spd
     else
-        -- dive harder when above stand
-        local spd = math.clamp(dist * 18, 50, 520)
-        if hrp.Position.Y > goal.Y + 12 then
-            spd = math.clamp(dist * 28, 200, 900)
-        end
+        local spd = math.clamp(dist * 14, 40, 280)
         bv.Velocity = delta.Unit * spd
     end
+
     local look = lookAt or goal
-    bg.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
+    bg.CFrame = CFrame.lookAt(
+        Vector3.new(hrp.Position.X, goal.Y, hrp.Position.Z),
+        Vector3.new(look.X, goal.Y, look.Z)
+    )
 end
 
 local function stopFarmHold()
@@ -1421,6 +1492,16 @@ do
     s1:Toggle("Auto Accept Quest", true, function(v)
         State.autoAccept = v
     end)
+    s1:Toggle("Auto Buso (J)", true, function(v)
+        State.autoBuso = v
+        if v then ensureAutoHaki() end
+        notify("Haki", v and "Buso auto ON" or "Buso auto OFF", v and "good" or "bad")
+    end)
+    s1:Toggle("Auto Haki / Obs (K)", true, function(v)
+        State.autoHaki = v
+        if v then ensureAutoHaki() end
+        notify("Haki", v and "Obs Haki auto ON" or "Obs Haki auto OFF", v and "good" or "bad")
+    end)
 end
 
 -- Specify (what to farm / which skills)
@@ -1748,8 +1829,23 @@ local function flatDist(a, b)
     return Vector3.new(d.X, 0, d.Z).Magnitude
 end
 
-local function farmStandPos(npcPos, _targetName, fromPos)
+-- Locked side vector so the stand doesn't orbit as you / NPC micro-move
+local _farmLockNpc = nil
+local _farmLockSide = nil -- Unit Vector3 XZ
+
+local function clearFarmLock()
+    _farmLockNpc = nil
+    _farmLockSide = nil
+end
+
+local function farmStandPos(npcPos, npc, fromPos)
     local side = tonumber(State.farmMelee) or 6
+    local h = math.clamp(tonumber(State.farmHeight) or 1.5, 0, 2.5)
+
+    if npc and npc == _farmLockNpc and _farmLockSide then
+        return npcPos + _farmLockSide * side + Vector3.new(0, h, 0)
+    end
+
     local from = fromPos
     if typeof(from) ~= "Vector3" then
         local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
@@ -1759,49 +1855,66 @@ local function farmStandPos(npcPos, _targetName, fromPos)
     if flat.Magnitude < 0.15 then
         flat = Vector3.new(1, 0, 0)
     end
-    -- stay beside at chest height — never park on top of the model
-    local h = math.clamp(tonumber(State.farmHeight) or 2, 0, 2.5)
-    return npcPos + flat.Unit * side + Vector3.new(0, h, 0)
+    _farmLockNpc = npc
+    _farmLockSide = flat.Unit
+    return npcPos + _farmLockSide * side + Vector3.new(0, h, 0)
 end
 
--- Auto Farm: fly in → HOLD beside target (noclip without hold = fall through island) → M1
+local function resolveFarmTarget(targetName, hrp)
+    -- Stick to the same NPC until dead / too far — stops hopping between spawns
+    if _farmLockNpc and _farmLockNpc.Parent then
+        local hum = _farmLockNpc:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            local ok, piv = pcall(function()
+                return _farmLockNpc:GetPivot().Position
+            end)
+            if ok and piv and (piv - hrp.Position).Magnitude < 90 then
+                return _farmLockNpc, piv, (piv - hrp.Position).Magnitude
+            end
+        end
+    end
+    clearFarmLock()
+    return findNearestEnemyModel(targetName)
+end
+
+-- Auto Farm: fly in once → HOLD stiff beside target → M1
 task.spawn(function()
     local lastFly = 0
     local lastPanel = 0
     while UI.alive do
         if State.autoFarm then
+            ensureAutoHaki()
             local targetName = farmTargetName()
             local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
             if targetName and hrp then
-                local npc, pos, dist = findNearestEnemyModel(targetName)
+                local npc, pos, dist = resolveFarmTarget(targetName, hrp)
                 if npc and pos then
-                    local stand = farmStandPos(pos, targetName, hrp.Position)
+                    local stand = farmStandPos(pos, npc, hrp.Position)
                     local melee = State.farmMelee or 6
                     local fdist = flatDist(hrp.Position, pos)
                     local dy = hrp.Position.Y - pos.Y
+                    local standDist = (hrp.Position - stand).Magnitude
 
-                    -- if stuck in the sky / wrong height, always repath down to stand
-                    if fdist > melee + 1.5 or math.abs(dy) > 6 then
-                        if tick() - lastFly > 0.3 then
-                            lastFly = tick()
-                            State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
-                            local ok, _, cache = bvFlyTo(stand, {
-                                speed = 700,
-                                arrive = math.max(2.5, melee * 0.35),
-                                keepNoclip = true,
-                                cancel = function()
-                                    return not State.autoFarm or not UI.alive
-                                end,
-                            })
-                            if cache then _farmNoclipCache = cache end
-                        end
+                    -- Only full repath when FAR. Micro errors = hold, not fly.
+                    local needFly = standDist > 28 or fdist > (melee + 14) or math.abs(dy) > 18
+                    if needFly and tick() - lastFly > 1.4 then
+                        lastFly = tick()
+                        State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
+                        local ok, _, cache = bvFlyTo(stand, {
+                            speed = 650,
+                            arrive = math.max(4, melee * 0.55),
+                            keepNoclip = true,
+                            cancel = function()
+                                return not State.autoFarm or not UI.alive
+                            end,
+                        })
+                        if cache then _farmNoclipCache = cache end
                     end
 
                     if State.autoFarm then
-                        npc, pos, dist = findNearestEnemyModel(targetName)
+                        npc, pos, dist = resolveFarmTarget(targetName, hrp)
                         if npc and pos then
-                            stand = farmStandPos(pos, targetName, hrp.Position)
-                            -- CRITICAL: hold beside NPC (not on head) while noclip
+                            stand = farmStandPos(pos, npc, hrp.Position)
                             farmHoldAt(stand, pos)
                             fdist = flatDist(hrp.Position, pos)
 
@@ -1810,9 +1923,8 @@ task.spawn(function()
                             faceWorld(pos)
 
                             local now = tick()
-                            -- M1 only when beside them at similar height — on-top = 0 dmg
-                            local yOk = math.abs(hrp.Position.Y - pos.Y) <= 7
-                            if State.farmM1 and fdist <= (melee + 1.5) and yOk and now - State.lastFarmM1 >= 0.09 then
+                            local yOk = math.abs(hrp.Position.Y - pos.Y) <= 8
+                            if State.farmM1 and fdist <= (melee + 2) and yOk and now - State.lastFarmM1 >= 0.09 then
                                 State.lastFarmM1 = now
                                 doFarmM1()
                             end
@@ -1837,19 +1949,19 @@ task.spawn(function()
                                 fdist or 0,
                                 tool and tool.Name or "no tool"
                             )
+                        else
+                            clearFarmLock()
                         end
                     end
                 else
+                    clearFarmLock()
                     -- No live NPC yet: fly to pad once, then HOLD still and wait.
-                    -- Re-flying every tick caused the up/down bob.
                     clearVirtualAim()
                     local waitStand, err, _, kind, dist0 = questKillStand(targetName)
                     if waitStand then
-                        -- questKillStand already returns a stand — do NOT farmStandPos() it again
-                        -- (that re-offsets from your current pos and moves the goal every pass)
-                        local fdist = flatDist(hrp.Position, waitStand)
+                        local wf = flatDist(hrp.Position, waitStand)
                         local dy = hrp.Position.Y - waitStand.Y
-                        if fdist > 20 or math.abs(dy) > 25 then
+                        if wf > 20 or math.abs(dy) > 25 then
                             if tick() - lastFly > 1.2 then
                                 lastFly = tick()
                                 State.status = string.format(
@@ -1886,10 +1998,12 @@ task.spawn(function()
                     end
                 end
             elseif not targetName then
+                clearFarmLock()
                 stopFarmHold()
                 clearVirtualAim()
                 State.status = "no farm target"
             else
+                clearFarmLock()
                 stopFarmHold()
                 clearVirtualAim()
                 State.status = "no character"
@@ -1898,15 +2012,19 @@ task.spawn(function()
                 lastPanel = tick()
                 pcall(refreshPanel)
             end
-            task.wait(0.06)
+            task.wait(0.08)
         else
+            clearFarmLock()
             stopFarmHold()
             if Aim.on then clearVirtualAim() end
+            -- still keep haki up even when farm is off, if toggles on
+            ensureAutoHaki()
             task.wait(0.25)
         end
     end
     clearVirtualAim()
     stopFarmNoclip()
+    clearFarmLock()
 end)
 
 task.spawn(function()
