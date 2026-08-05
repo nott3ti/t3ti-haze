@@ -3623,7 +3623,7 @@ do
     s2:Slider("Attack Range", 14, 8, 40, "studs", function(v)
         State.farmRange = v
     end)
-    s2:Slider("Hover Height", 3, 0, 20, "studs", function(v)
+    s2:Slider("Hover Height", 2, 0, 8, "studs", function(v)
         State.farmHeight = v
     end)
 end
