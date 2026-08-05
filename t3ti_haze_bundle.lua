@@ -2268,7 +2268,7 @@ local State = {
     lastFarmSkill = 0,
     lastFarmClick = 0,
     lastFarmM1 = 0,
-    farmHeight = 3,
+    farmHeight = 1.5,
     skillEnabled = {},
     m1Tool = "Auto",
 }
@@ -2853,33 +2853,69 @@ local function questKillStand(targetName)
 end
 
 --[[
-  Fast noclip BV fly â€” matches working Haze Seas tweens we probed:
-  - CanCollide=false on ALL character parts (through walls)
-  - BodyVelocity + BodyGyro on HRP (NOT Anchored, NOT CFrame teleport)
+  Fast noclip BV fly:
+  - Refresh CanCollide=false every few frames (gear/humanoid resets it)
+  - PlatformStand so humanoid does not fight the mover
+  - If stuck, lift over then continue (no jam-then-shove)
 ]]
 local _questFlyToken = 0
 local _farmNoclipCache = nil
+
 local function setNoclip(char, on, cache)
     cache = cache or {}
+    if not char then return cache end
     for _, p in ipairs(char:GetDescendants()) do
         if p:IsA("BasePart") then
             if on then
                 if cache[p] == nil then
-                    cache[p] = p.CanCollide
+                    cache[p] = {
+                        collide = p.CanCollide,
+                        query = p.CanQuery,
+                        touch = p.CanTouch,
+                    }
                 end
                 p.CanCollide = false
+                pcall(function()
+                    p.CanQuery = false
+                    p.CanTouch = false
+                end)
             elseif cache[p] ~= nil then
-                p.CanCollide = cache[p]
+                local c = cache[p]
+                if type(c) == "boolean" then
+                    p.CanCollide = c
+                else
+                    p.CanCollide = c.collide ~= false
+                    pcall(function()
+                        p.CanQuery = c.query ~= false
+                        p.CanTouch = c.touch ~= false
+                    end)
+                end
             end
         end
     end
     return cache
 end
 
+local function setFlyHumanoid(hum, on)
+    if not hum then return end
+    pcall(function()
+        if on then
+            hum.PlatformStand = true
+            hum.AutoRotate = false
+            hum:ChangeState(Enum.HumanoidStateType.Physics)
+        else
+            hum.PlatformStand = false
+            hum.AutoRotate = true
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+    end)
+end
+
 local function bvFlyTo(goal, opts)
     opts = opts or {}
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or typeof(goal) ~= "Vector3" then
         return false, "no character/goal"
     end
@@ -2896,30 +2932,59 @@ local function bvFlyTo(goal, opts)
     end
 
     local collCache = setNoclip(char, true, {})
+    setFlyHumanoid(hum, true)
+
+    local addConn
+    addConn = char.DescendantAdded:Connect(function(inst)
+        if token ~= _questFlyToken then return end
+        if inst:IsA("BasePart") then
+            if collCache[inst] == nil then
+                collCache[inst] = {
+                    collide = inst.CanCollide,
+                    query = inst.CanQuery,
+                    touch = inst.CanTouch,
+                }
+            end
+            inst.CanCollide = false
+            pcall(function()
+                inst.CanQuery = false
+                inst.CanTouch = false
+            end)
+        end
+    end)
 
     local bv = Instance.new("BodyVelocity")
     bv.Name = "T3tiQuestFly"
-    bv.MaxForce = Vector3.new(1, 1, 1) * 2e10
-    bv.P = 20000
+    bv.MaxForce = Vector3.new(1, 1, 1) * 4e10
+    bv.P = 40000
     bv.Velocity = Vector3.zero
     bv.Parent = hrp
 
     local bg = Instance.new("BodyGyro")
     bg.Name = "T3tiQuestGyro"
-    bg.MaxTorque = Vector3.new(1, 1, 1) * 2e10
-    bg.P = 10000
-    bg.D = 500
+    bg.MaxTorque = Vector3.new(1, 1, 1) * 4e10
+    bg.P = 20000
+    bg.D = 800
     bg.CFrame = hrp.CFrame
     bg.Parent = hrp
 
     local dist0 = (goal - hrp.Position).Magnitude
     local t0 = tick()
-    -- long sky-island hops need more than a few seconds
-    local maxT = math.clamp(dist0 / math.max(200, speed) + 8, 6, 50)
+    local maxT = math.clamp(dist0 / math.max(200, speed) + 10, 8, 55)
     local okArrive = false
+    local lastPos = hrp.Position
+    local stuckFor = 0
+    local tickN = 0
+    local lifting = 0
 
     while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
         if opts.cancel and opts.cancel() then break end
+        tickN += 1
+        if tickN % 3 == 0 then
+            setNoclip(char, true, collCache)
+            setFlyHumanoid(hum, true)
+        end
+
         local pos = hrp.Position
         local delta = goal - pos
         local dist = delta.Magnitude
@@ -2927,21 +2992,48 @@ local function bvFlyTo(goal, opts)
             okArrive = true
             break
         end
-        local v = speed
-        if dist < 60 then
-            v = math.max(80, speed * (dist / 60))
+
+        local moved = (pos - lastPos).Magnitude
+        if dist > arrive + 4 and moved < 0.45 then
+            stuckFor += 1
+        else
+            stuckFor = math.max(0, stuckFor - 2)
         end
-        bv.Velocity = delta.Unit * v
+        lastPos = pos
+
+        local dir = delta.Unit
+        local v = speed
+        if stuckFor >= 6 or lifting > 0 then
+            lifting = math.max(lifting - 1, stuckFor >= 6 and 18 or lifting)
+            stuckFor = 0
+            local liftGoal = pos + Vector3.new(0, 22, 0) + dir * 18
+            local liftDelta = liftGoal - pos
+            if liftDelta.Magnitude > 1e-3 then
+                dir = liftDelta.Unit
+            end
+            v = math.clamp(speed * 0.85, 280, 750)
+        elseif dist < 35 then
+            v = math.clamp(speed * (dist / 35), 140, speed)
+        end
+
+        bv.Velocity = dir * v
+        pcall(function()
+            hrp.AssemblyLinearVelocity = dir * v
+        end)
         bg.CFrame = CFrame.lookAt(pos, Vector3.new(goal.X, pos.Y, goal.Z))
         RunService.Heartbeat:Wait()
     end
 
+    pcall(function()
+        if addConn then addConn:Disconnect() end
+    end)
     pcall(function()
         bv.Velocity = Vector3.zero
         bv:Destroy()
         bg:Destroy()
     end)
     if not keepNoclip then
+        setFlyHumanoid(hum, false)
         setNoclip(char, false, collCache)
     end
 
@@ -2955,48 +3047,58 @@ local function bvFlyTo(goal, opts)
     return settle <= 50, settle <= 50 and "ok" or "rubberband", collCache
 end
 
--- Keep floating beside the NPC while noclip (otherwise you fall through the island)
+-- Keep floating at combat stand (noclip without hold = fall through island)
 local function farmHoldAt(goal, lookAt)
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or typeof(goal) ~= "Vector3" then return end
-    if not _farmNoclipCache then
-        _farmNoclipCache = setNoclip(char, true, {})
-    end
+    _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
+    setFlyHumanoid(hum, true)
+
     local bv = hrp:FindFirstChild("T3tiFarmHold")
     if not bv then
         bv = Instance.new("BodyVelocity")
         bv.Name = "T3tiFarmHold"
-        bv.MaxForce = Vector3.new(1, 1, 1) * 2e10
-        bv.P = 25000
+        bv.MaxForce = Vector3.new(1, 1, 1) * 4e10
+        bv.P = 35000
         bv.Parent = hrp
     end
     local bg = hrp:FindFirstChild("T3tiFarmGyro")
     if not bg then
         bg = Instance.new("BodyGyro")
         bg.Name = "T3tiFarmGyro"
-        bg.MaxTorque = Vector3.new(1, 1, 1) * 2e10
-        bg.P = 14000
-        bg.D = 400
+        bg.MaxTorque = Vector3.new(1, 1, 1) * 4e10
+        bg.P = 20000
+        bg.D = 600
         bg.Parent = hrp
     end
     local delta = goal - hrp.Position
     local dist = delta.Magnitude
-    if dist < 2 then
+    if dist < 1.5 then
         bv.Velocity = Vector3.zero
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.zero
+        end)
     else
-        bv.Velocity = delta.Unit * math.clamp(dist * 14, 35, 520)
+        bv.Velocity = delta.Unit * math.clamp(dist * 16, 40, 420)
     end
     local look = lookAt or goal
     bg.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
 end
 
 local function stopFarmHold()
-    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    for _, n in ipairs({ "T3tiFarmHold", "T3tiFarmGyro" }) do
-        local o = hrp:FindFirstChild(n)
-        if o then pcall(function() o:Destroy() end) end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hrp then
+        for _, n in ipairs({ "T3tiFarmHold", "T3tiFarmGyro" }) do
+            local o = hrp:FindFirstChild(n)
+            if o then pcall(function() o:Destroy() end) end
+        end
+    end
+    if not State.autoFarm then
+        setFlyHumanoid(hum, false)
     end
 end
 
@@ -3766,14 +3868,26 @@ refreshPanel()
 --------------------------------------------------------------------
 -- Loops
 --------------------------------------------------------------------
--- Combat stand: slightly above feet, not sky-hover (M1 needs ~5â€“10 studs)
-local function farmStandPos(pos, targetName)
-    local h = tonumber(State.farmHeight) or 3
-    local n = tostring(targetName or ""):lower()
-    if n:find("god", 1, true) or n:find("boss", 1, true) then
-        h = math.min(h, 3)
+-- Combat stand BESIDE the NPC (same height). Stacking on their head = 0 damage.
+local function flatDist(a, b)
+    local d = a - b
+    return Vector3.new(d.X, 0, d.Z).Magnitude
+end
+
+local function farmStandPos(npcPos, _targetName, fromPos)
+    local side = tonumber(State.farmMelee) or 6
+    local from = fromPos
+    if typeof(from) ~= "Vector3" then
+        local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        from = hrp and hrp.Position or (npcPos + Vector3.new(side, 0, 0))
     end
-    return pos + Vector3.new(0, math.max(0, h), 0)
+    local flat = Vector3.new(from.X - npcPos.X, 0, from.Z - npcPos.Z)
+    if flat.Magnitude < 0.15 then
+        flat = Vector3.new(1, 0, 0)
+    end
+    -- stay beside at chest height â€” never park on top of the model
+    local h = math.clamp(tonumber(State.farmHeight) or 2, 0, 2.5)
+    return npcPos + flat.Unit * side + Vector3.new(0, h, 0)
 end
 
 -- Auto Farm: fly in â†’ HOLD beside target (noclip without hold = fall through island) â†’ M1
@@ -3787,36 +3901,42 @@ task.spawn(function()
             if targetName and hrp then
                 local npc, pos, dist = findNearestEnemyModel(targetName)
                 if npc and pos then
-                    local stand = farmStandPos(pos, targetName)
+                    local stand = farmStandPos(pos, targetName, hrp.Position)
                     local melee = State.farmMelee or 6
+                    local fdist = flatDist(hrp.Position, pos)
 
-                    if dist > melee + 2 and tick() - lastFly > 0.3 then
-                        lastFly = tick()
-                        State.status = string.format("close Â· %.0fd", dist)
-                        local ok, _, cache = bvFlyTo(stand, {
-                            speed = 950,
-                            arrive = math.max(3.5, melee * 0.5),
-                            keepNoclip = true,
-                            cancel = function()
-                                return not State.autoFarm or not UI.alive
-                            end,
-                        })
-                        if cache then _farmNoclipCache = cache end
+                    if fdist > melee + 1.5 or math.abs(hrp.Position.Y - pos.Y) > 6 then
+                        if tick() - lastFly > 0.3 then
+                            lastFly = tick()
+                            State.status = string.format("close Â· %.0fd", fdist)
+                            local ok, _, cache = bvFlyTo(stand, {
+                                speed = 950,
+                                arrive = math.max(2.5, melee * 0.35),
+                                keepNoclip = true,
+                                cancel = function()
+                                    return not State.autoFarm or not UI.alive
+                                end,
+                            })
+                            if cache then _farmNoclipCache = cache end
+                        end
                     end
 
                     if State.autoFarm then
                         npc, pos, dist = findNearestEnemyModel(targetName)
                         if npc and pos then
-                            stand = farmStandPos(pos, targetName)
-                            -- CRITICAL: hold while noclip or you fall through Sky Islands
+                            stand = farmStandPos(pos, targetName, hrp.Position)
+                            -- CRITICAL: hold beside NPC (not on head) while noclip
                             farmHoldAt(stand, pos)
+                            fdist = flatDist(hrp.Position, pos)
 
                             local aimPos = pos + Vector3.new(0, 2, 0)
                             setVirtualAim(aimPos, npc)
                             faceWorld(pos)
 
                             local now = tick()
-                            if State.farmM1 and dist <= (melee + 3) and now - State.lastFarmM1 >= 0.09 then
+                            -- M1 only when beside them at similar height â€” on-top = 0 dmg
+                            local yOk = math.abs(hrp.Position.Y - pos.Y) <= 7
+                            if State.farmM1 and fdist <= (melee + 1.5) and yOk and now - State.lastFarmM1 >= 0.09 then
                                 State.lastFarmM1 = now
                                 doFarmM1()
                             end
@@ -3834,11 +3954,11 @@ task.spawn(function()
                             local fruit = currentFruitName() or "?"
                             local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
                             State.status = string.format(
-                                "%s Â· %s Â· %dhp Â· %.0fd Â· %s",
+                                "%s Â· %s Â· %dhp Â· flat%.0f Â· %s",
                                 fruit,
                                 targetName,
                                 hp,
-                                dist or 0,
+                                fdist or 0,
                                 tool and tool.Name or "no tool"
                             )
                         end
