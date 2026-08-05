@@ -85,11 +85,12 @@ local State = {
     farmMode = "Quest Target", -- or "Selected Enemy"
     farmEnemy = "Holy Soldier",
     farmRange = 25,
-    farmSkillCd = 1.2,
+    farmSkillCd = 0.85,
     lastFarmSkill = 0,
     lastFarmClick = 0,
     farmHeight = 8,
-    useAllSkills = true, -- Sea Rift alone often 0 dmg on Divine; rotate fruit skills
+    useAllSkills = true, -- cast every equipped fruit skill (Configuration / keybound)
+    skillRotate = 1,
 }
 
 local function notify(t, b, k)
@@ -291,9 +292,11 @@ end
 local function fruitFolder()
     local fp = PG:FindFirstChild("FruitPowers")
     if not fp then return nil end
-    return fp:FindFirstChild("Tremor") or fp:GetChildren()[1]
+    -- whatever fruit the player currently has equipped
+    return fp:GetChildren()[1]
 end
 
+-- All fruit remotes (minus *2 variants)
 local function skillRemoteNames()
     local fruit = fruitFolder()
     local ev = fruit and fruit:FindFirstChild("Events")
@@ -305,6 +308,30 @@ local function skillRemoteNames()
         end
     end
     table.sort(names)
+    return names
+end
+
+-- Skills the player actually has on this fruit (Configuration + KeyString)
+local function equippedSkillNames()
+    local fruit = fruitFolder()
+    if not fruit then return {} end
+    local ev = fruit:FindFirstChild("Events")
+    local names, seen = {}, {}
+    for _, c in ipairs(fruit:GetChildren()) do
+        if c:IsA("Configuration") then
+            local attack = c:FindFirstChild("AttackNameString")
+            local name = tostring((attack and attack.Value) or c.Name)
+            local remote = ev and ev:FindFirstChild(name)
+            if remote and remote:IsA("RemoteEvent") and not seen[name] then
+                seen[name] = true
+                names[#names + 1] = name
+            end
+        end
+    end
+    table.sort(names)
+    if #names == 0 then
+        return skillRemoteNames()
+    end
     return names
 end
 
@@ -860,16 +887,26 @@ local function castFarmSkills(aimPos, aimTarget)
         setVirtualAim(aimPos, aimTarget)
         faceWorld(aimPos)
     end
+    local equipped = equippedSkillNames()
+    if #equipped == 0 then
+        castSkill(State.skillName)
+        return
+    end
     if State.useAllSkills then
-        local names = skillRemoteNames()
-        for _, n in ipairs(names) do
+        -- fire every equipped fruit skill (what you actually have bound)
+        for _, n in ipairs(equipped) do
             castSkill(n)
-            task.wait(0.05)
+            task.wait(0.08)
         end
     else
-        castSkill(State.skillName)
+        -- single selected skill, keep selection valid against equipped list
+        local name = State.skillName
+        if not table.find(equipped, name) then
+            name = equipped[1]
+            State.skillName = name
+        end
+        castSkill(name)
     end
-    -- leave Aim.on so brief post-cast scripts still see the hit; cleared when farm off
 end
 
 local _farmNoclipCache = nil
@@ -1085,7 +1122,8 @@ do
     if not table.find(enemies, State.farmEnemy) then
         State.farmEnemy = enemies[1]
     end
-    local skills = skillRemoteNames()
+    local skills = equippedSkillNames()
+    if #skills == 0 then skills = skillRemoteNames() end
     if #skills == 0 then skills = { "Sea Rift" } end
     if not table.find(skills, State.skillName) then
         State.skillName = skills[1]
@@ -1104,13 +1142,16 @@ do
     end)
 
     local s2 = tab:Section("Skills")
-    s2:Dropdown("Skill", skills, State.skillName, function(v)
+    s2:Label("Equipped: " .. table.concat(skills, ", "))
+    s2:Dropdown("Single Skill", skills, State.skillName, function(v)
         State.skillName = v
+        State.useAllSkills = false
     end)
-    s2:Toggle("Use All Fruit Skills", false, function(v)
+    s2:Toggle("Use All Equipped Skills", true, function(v)
         State.useAllSkills = v
+        notify("Skills", v and ("all · " .. #equippedSkillNames()) or State.skillName, "good")
     end)
-    s2:Slider("Skill CD", 12, 3, 50, "x100ms", function(v)
+    s2:Slider("Skill CD", 8, 3, 50, "x100ms", function(v)
         State.farmSkillCd = v / 10
     end)
     s2:Slider("Attack Range", 25, 10, 80, "studs", function(v)
@@ -1146,9 +1187,12 @@ do
     end)
 
     -- Auto skill lives here (manual skill cast UI removed)
-    local skills = skillRemoteNames()
+    local skills = equippedSkillNames()
+    if #skills == 0 then skills = skillRemoteNames() end
     if #skills == 0 then skills = { "Sea Rift" } end
-    State.skillName = skills[1]
+    if not table.find(skills, State.skillName) then
+        State.skillName = skills[1]
+    end
     local s2 = tab:Section("Auto Skill")
     s2:Dropdown("Skill", skills, State.skillName, function(v) State.skillName = v end)
     s2:Toggle("Auto Skill", false, function(v)
