@@ -2045,11 +2045,31 @@ end
 local _farmLockNpc = nil
 local _farmLockSide = nil -- Unit Vector3 XZ
 local _lastCombatStand = nil -- stay here after a kill instead of pad-yo-yo
+local _lastCombatTarget = nil -- quest name that stand belongs to
 local _lastCombatAt = 0
+local _farmTrackedQuest = nil -- detect quest swaps
 
 local function clearFarmLock()
     _farmLockNpc = nil
     _farmLockSide = nil
+end
+
+local function clearFarmArena()
+    clearFarmLock()
+    _lastCombatStand = nil
+    _lastCombatTarget = nil
+    _lastCombatAt = 0
+end
+
+local function onFarmQuestChanged(targetName)
+    local key = tostring(targetName or "")
+    if key == "" then return false end
+    if _farmTrackedQuest == key then return false end
+    _farmTrackedQuest = key
+    clearFarmArena()
+    requestFarmRepath()
+    State.status = "quest swap · " .. key
+    return true
 end
 
 local function farmStandPos(npcPos, npc, fromPos)
@@ -2105,10 +2125,16 @@ task.spawn(function()
                 local targetName = farmTargetName()
                 local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
                 if targetName and hrp then
+                    -- New quest (e.g. Thunder God → Revolutionary): leave old arena
+                    if onFarmQuestChanged(targetName) then
+                        lastFly = 0
+                    end
+
                     local npc, pos, dist = resolveFarmTarget(targetName, hrp)
                     if npc and pos then
                         local stand = farmStandPos(pos, npc, hrp.Position)
                         _lastCombatStand = stand
+                        _lastCombatTarget = targetName
                         _lastCombatAt = tick()
                         local melee = State.farmMelee or 6
                         local fdist = flatDist(hrp.Position, pos)
@@ -2143,6 +2169,7 @@ task.spawn(function()
                             if npc and pos then
                                 stand = farmStandPos(pos, npc, hrp.Position)
                                 _lastCombatStand = stand
+                                _lastCombatTarget = targetName
                                 _lastCombatAt = tick()
                                 farmHoldAt(stand, pos)
                                 fdist = flatDist(hrp.Position, pos)
@@ -2184,13 +2211,15 @@ task.spawn(function()
                         end
                     else
                         clearFarmLock()
-                        -- Boss dead / waiting respawn: HOLD last fight spot — do NOT
-                        -- repath to pad (pad Y offset caused the up/down bounce).
+                        -- Boss dead / waiting respawn: HOLD last fight spot ONLY for SAME quest.
+                        -- Different quest must travel to new pads (no "last" from Thunder God).
                         clearVirtualAim()
                         local waitStand, err, _, kind, dist0 = questKillStand(targetName)
                         local perch, perchKind = waitStand, kind
-                        if _lastCombatStand and (tick() - _lastCombatAt) < 60 then
-                            -- same arena: freeze where you killed
+                        local sameQuestLast = _lastCombatStand
+                            and _lastCombatTarget == targetName
+                            and (tick() - _lastCombatAt) < 60
+                        if sameQuestLast then
                             if (not waitStand)
                                 or flatDist(_lastCombatStand, waitStand) < 55
                                 or math.abs(_lastCombatStand.Y - (waitStand and waitStand.Y or _lastCombatStand.Y)) < 35
@@ -2202,9 +2231,8 @@ task.spawn(function()
                         if perch then
                             local wf = flatDist(hrp.Position, perch)
                             local dy = hrp.Position.Y - perch.Y
-                            -- Only long-range travel uses bvFlyTo; nearby = hold still
-                            local far = wf > 40 or math.abs(dy) > 35
-                            if far and (_forceFarmRepath or tick() - lastFly > 1.2) then
+                            local far = wf > 40 or math.abs(dy) > 35 or _forceFarmRepath
+                            if far and tick() - lastFly > 1.0 then
                                 lastFly = tick()
                                 _forceFarmRepath = false
                                 State.status = string.format(
@@ -2225,7 +2253,6 @@ task.spawn(function()
                                     State.status = "travel fail · " .. tostring(targetName)
                                 end
                             else
-                                -- cancel any leftover travel so we don't bob
                                 _questFlyToken += 1
                                 farmHoldAt(perch, perch)
                                 State.status = string.format(
@@ -2240,7 +2267,8 @@ task.spawn(function()
                         end
                     end
                 elseif not targetName then
-                    clearFarmLock()
+                    clearFarmArena()
+                    _farmTrackedQuest = nil
                     stopFarmHold()
                     clearVirtualAim()
                     State.status = "no farm target"
@@ -2271,7 +2299,7 @@ task.spawn(function()
     end
     clearVirtualAim()
     stopFarmNoclip()
-    clearFarmLock()
+    clearFarmArena()
 end)
 
 task.spawn(function()
