@@ -2262,12 +2262,13 @@ local State = {
     farmClick = false, -- OS mouse1click â€” NEVER needed; clicks outside Roblox
     farmMode = "Quest Target", -- or "Selected Enemy"
     farmEnemy = "Holy Soldier",
-    farmRange = 25,
+    farmRange = 14, -- engage / stay near target (M1 needs ~5â€“10 studs)
+    farmMelee = 9, -- only Activate when this close
     farmSkillCd = 0.85,
     lastFarmSkill = 0,
     lastFarmClick = 0,
     lastFarmM1 = 0,
-    farmHeight = 8,
+    farmHeight = 3, -- low hover so melee connects (bosses hate high hover)
     skillEnabled = {}, -- [skillName] = true/false â€” Specify inventory picks
     m1Tool = "Auto", -- Auto = match equipped fruit name; else Backpack tool name
 }
@@ -3455,10 +3456,13 @@ do
     s2:Slider("Skill CD", 8, 3, 50, "x100ms", function(v)
         State.farmSkillCd = v / 10
     end)
-    s2:Slider("Attack Range", 25, 10, 80, "studs", function(v)
+    s2:Slider("Melee Range", 9, 5, 20, "studs", function(v)
+        State.farmMelee = v
+    end)
+    s2:Slider("Attack Range", 14, 8, 40, "studs", function(v)
         State.farmRange = v
     end)
-    s2:Slider("Hover Height", 8, 0, 40, "studs", function(v)
+    s2:Slider("Hover Height", 3, 0, 20, "studs", function(v)
         State.farmHeight = v
     end)
 end
@@ -3703,7 +3707,17 @@ refreshPanel()
 --------------------------------------------------------------------
 -- Loops
 --------------------------------------------------------------------
--- Auto Farm: find live NPC â†’ BV hover + skills.
+-- Combat stand: slightly above feet, not sky-hover (M1 needs ~5â€“10 studs)
+local function farmStandPos(pos, targetName)
+    local h = tonumber(State.farmHeight) or 3
+    local n = tostring(targetName or ""):lower()
+    if n:find("god", 1, true) or n:find("boss", 1, true) then
+        h = math.min(h, 3)
+    end
+    return pos + Vector3.new(0, math.max(0, h), 0)
+end
+
+-- Auto Farm: find live NPC â†’ BV into melee â†’ tool Activate + selected skills.
 -- If none streamed yet, BV to nearest quest pad / stand so enemies can load in.
 task.spawn(function()
     local lastFly = 0
@@ -3715,15 +3729,17 @@ task.spawn(function()
             if targetName and hrp then
                 local npc, pos, dist = findNearestEnemyModel(targetName)
                 if npc and pos then
-                    local hover = pos + Vector3.new(0, State.farmHeight or 8, 0)
-                    local range = State.farmRange or 25
+                    local stand = farmStandPos(pos, targetName)
+                    local range = State.farmRange or 14
+                    local melee = State.farmMelee or 9
 
-                    if dist > range + 8 and tick() - lastFly > 0.35 then
+                    -- keep closing until inside melee (bosses like Thunder God need this)
+                    if dist > melee + 1.5 and tick() - lastFly > 0.25 then
                         lastFly = tick()
-                        State.status = "fly Â· " .. tostring(targetName)
-                        local ok, _, cache = bvFlyTo(hover, {
-                            speed = 900,
-                            arrive = math.max(8, range * 0.45),
+                        State.status = string.format("close Â· %.0fd", dist)
+                        local ok, _, cache = bvFlyTo(stand, {
+                            speed = 950,
+                            arrive = math.max(4, melee * 0.55),
                             keepNoclip = true,
                             cancel = function()
                                 return not State.autoFarm or not UI.alive
@@ -3739,14 +3755,14 @@ task.spawn(function()
                         if npc and pos then
                             local aimPos = pos + Vector3.new(0, 2, 0)
                             setVirtualAim(aimPos, npc)
+                            faceWorld(pos)
 
                             local now = tick()
-                            -- In-game M1 (tool Activate) â€” works without Roblox focus, no OS mouse steal
-                            if State.farmM1 and now - State.lastFarmM1 >= 0.12 then
+                            -- M1 only in real melee range (tested: Thunder God hits at ~5)
+                            if State.farmM1 and dist <= (melee + 4) and now - State.lastFarmM1 >= 0.10 then
                                 State.lastFarmM1 = now
                                 doFarmM1()
                             end
-                            -- OS click only if user forced it on (not recommended)
                             if State.farmClick and now - State.lastFarmClick >= 0.12 then
                                 State.lastFarmClick = now
                                 farmClick()
@@ -3770,9 +3786,9 @@ task.spawn(function()
                         local stand, err, _, kind, dist0 = questKillStand(targetName)
                         if stand then
                             State.status = string.format("goto Â· %s Â· %.0fd", tostring(kind or "pad"), dist0 or 0)
-                            local ok, _, cache = bvFlyTo(stand + Vector3.new(0, State.farmHeight or 8, 0), {
+                            local ok, _, cache = bvFlyTo(farmStandPos(stand, targetName), {
                                 speed = 900,
-                                arrive = 14,
+                                arrive = 12,
                                 keepNoclip = true,
                                 cancel = function()
                                     return not State.autoFarm or not UI.alive
