@@ -67,7 +67,7 @@ local SkillUsed = CE:FindFirstChild("SkillUsed")
 local ToggleAutoQuest = CE:FindFirstChild("ToggleAutoQuest")
 
 local State = {
-    autoAccept = false,
+    autoAccept = true, -- keep best quest for your level accepted
     autoFruit = false,
     autoSkill = false,
     skillName = "Sea Rift",
@@ -313,8 +313,22 @@ local function castSkill(name)
     local fruit = fruitFolder()
     local ev = fruit and fruit:FindFirstChild("Events")
     local remote = ev and ev:FindFirstChild(name)
+    local pos = State.aimPos
+    local hit = State.aimHit
     if remote and remote:IsA("RemoteEvent") then
-        local ok, err = pcall(function() remote:FireServer() end)
+        local ok, err = pcall(function()
+            if typeof(pos) == "Vector3" then
+                remote:FireServer(pos)
+            else
+                remote:FireServer()
+            end
+        end)
+        if not ok and hit then
+            ok, err = pcall(function() remote:FireServer(hit) end)
+        end
+        if not ok then
+            ok, err = pcall(function() remote:FireServer() end)
+        end
         if ok and SkillUsed then
             pcall(function() SkillUsed:FireServer(name) end)
         end
@@ -327,34 +341,6 @@ local function castSkill(name)
     return false, "skill remote missing"
 end
 
--- Current quest target from QuestGui ("Kill 4 Marine Grunts" -> "Marine Grunt")
-local function currentQuestTarget()
-    local qg = QuestGui
-    if not qg then return nil end
-    local function clean(m)
-        m = tostring(m or ""):gsub("%s+$", ""):gsub("^%s+", "")
-        if m == "" then return nil end
-        -- strip trailing plural s when it's "... Captains" / "... Grunts"
-        if m:sub(-1) == "s" and not m:lower():find("boss") then
-            local sing = m:sub(1, -2)
-            if #sing > 3 then m = sing end
-        end
-        return m
-    end
-    for _, d in ipairs(qg:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextButton") then
-            local t = d.Text or ""
-            local m = t:match("[Kk]ill%s+%d+%s+(.+)")
-                or t:match("[Dd]efeat%s+%d+%s+(.+)")
-                or t:match("[Qq]uest:%s*(.+)")
-                or t:match("[Tt]arget:%s*(.+)")
-            if m then
-                return clean(m)
-            end
-        end
-    end
-end
-
 -- Normalize quest-option folder names into an NPC search string
 local function cleanEnemyName(name)
     local m = tostring(name or ""):gsub("%s+$", ""):gsub("^%s+", "")
@@ -364,6 +350,37 @@ local function cleanEnemyName(name)
         if #sing > 3 then m = sing end
     end
     return m
+end
+
+-- Active kill quest only ("Kill 5 Holy Soldiers" -> "Holy Soldier").
+-- Do NOT use "Quest: Title" — that's the quest name, not the NPC (and shows even when inactive).
+local function currentQuestTarget()
+    local qg = QuestGui
+    if not qg then return nil end
+    local function clean(m)
+        return cleanEnemyName(m)
+    end
+    for _, d in ipairs(qg:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            local t = d.Text or ""
+            local m = t:match("[Kk]ill%s+%d+%s+(.+)")
+                or t:match("[Dd]efeat%s+%d+%s+(.+)")
+            if m then
+                return clean(m)
+            end
+        end
+    end
+end
+
+local function ensureBestQuest()
+    local active = currentQuestTarget()
+    if active then
+        return true, active
+    end
+    local best = bestQuest()
+    if not best then return false, "no quest for level" end
+    local ok, err = acceptQuest(best)
+    return ok, ok and (cleanEnemyName(best.target) or best.key) or err
 end
 
 -- Spawn pad parts live under ObservationHaki SpawnPoints
@@ -658,7 +675,7 @@ local function farmTargetName()
     if State.farmMode == "Selected Enemy" then
         return State.farmEnemy
     end
-    -- 1) live quest tracker text, 2) best quest for your level, 3) dropdown fallback
+    -- Active Kill-quest NPC, else best quest for your level (e.g. Holy Soldier @ 1050)
     local fromGui = currentQuestTarget()
     if fromGui then return fromGui end
     local best = bestQuest()
@@ -734,6 +751,8 @@ local function clearVirtualAim()
     Aim.on = false
     Aim.hit = nil
     Aim.target = nil
+    State.aimPos = nil
+    State.aimHit = nil
 end
 
 local function setVirtualAim(pos, targetInst)
@@ -747,6 +766,8 @@ local function setVirtualAim(pos, targetInst)
     local sx, sy = cam:WorldToViewportPoint(pos)
     Aim.screen = Vector2.new(sx, sy)
     Aim.on = true
+    State.aimPos = pos
+    State.aimHit = Aim.hit
     -- Some games also listen for a mouse-pos remote
     if UpdateMousePosition and UpdateMousePosition:IsA("RemoteEvent") then
         pcall(function()
@@ -950,7 +971,7 @@ do
         notify("Quests", State.status, ok2 and "good" or "bad")
         refreshPanel()
     end)
-    s1:Toggle("Auto Accept", false, function(v)
+    s1:Toggle("Auto Accept", true, function(v)
         State.autoAccept = v
         notify("Auto Accept", v and "ON" or "OFF", v and "good" or "bad")
     end)
@@ -1032,11 +1053,17 @@ do
         else
             State.status = "farm on"
             pcall(installVirtualMouse)
-            -- close menu so accidental M1 can't toggle widgets
+            -- no active kill quest → accept best for your level (Holy Soldier @ ~1050)
+            task.spawn(function()
+                local ok, info = ensureBestQuest()
+                State.status = ok and ("quest · " .. tostring(info)) or ("quest? · " .. tostring(info))
+                pcall(refreshPanel)
+                notify("Quest", tostring(info), ok and "good" or "bad")
+            end)
             UI.uiVisible = false
             pcall(function() UI:PlayUI("close") end)
         end
-        notify("Farm", v and "ON (virtual aim)" or "OFF", v and "good" or "bad")
+        notify("Farm", v and "ON" or "OFF", v and "good" or "bad")
     end)
     s1:Toggle("Skills on Target", true, function(v)
         State.farmSkills = v
