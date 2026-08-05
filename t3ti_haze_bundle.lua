@@ -2503,21 +2503,39 @@ end
 local function currentQuestTarget()
     local qg = QuestGui
     if not qg then return nil end
+    local function clean(m)
+        m = tostring(m or ""):gsub("%s+$", ""):gsub("^%s+", "")
+        if m == "" then return nil end
+        -- strip trailing plural s when it's "... Captains" / "... Grunts"
+        if m:sub(-1) == "s" and not m:lower():find("boss") then
+            local sing = m:sub(1, -2)
+            if #sing > 3 then m = sing end
+        end
+        return m
+    end
     for _, d in ipairs(qg:GetDescendants()) do
         if d:IsA("TextLabel") or d:IsA("TextButton") then
             local t = d.Text or ""
-            local m = t:match("[Kk]ill%s+%d+%s+(.+)") or t:match("[Dd]efeat%s+%d+%s+(.+)")
+            local m = t:match("[Kk]ill%s+%d+%s+(.+)")
+                or t:match("[Dd]efeat%s+%d+%s+(.+)")
+                or t:match("[Qq]uest:%s*(.+)")
+                or t:match("[Tt]arget:%s*(.+)")
             if m then
-                m = m:gsub("%s+$", "")
-                -- strip trailing plural s when it's "... Captains" / "... Grunts"
-                if m:sub(-1) == "s" and not m:lower():find("boss") then
-                    local sing = m:sub(1, -2)
-                    if #sing > 3 then m = sing end
-                end
-                return m
+                return clean(m)
             end
         end
     end
+end
+
+-- Normalize quest-option folder names into an NPC search string
+local function cleanEnemyName(name)
+    local m = tostring(name or ""):gsub("%s+$", ""):gsub("^%s+", "")
+    if m == "" then return nil end
+    if m:sub(-1) == "s" and not m:lower():find("boss") then
+        local sing = m:sub(1, -2)
+        if #sing > 3 then m = sing end
+    end
+    return m
 end
 
 -- Spawn pad parts live under ObservationHaki SpawnPoints
@@ -2812,7 +2830,36 @@ local function farmTargetName()
     if State.farmMode == "Selected Enemy" then
         return State.farmEnemy
     end
-    return currentQuestTarget() or State.farmEnemy
+    -- 1) live quest tracker text, 2) best quest for your level, 3) dropdown fallback
+    local fromGui = currentQuestTarget()
+    if fromGui then return fromGui end
+    local best = bestQuest()
+    if best and best.target then
+        local cleaned = cleanEnemyName(best.target)
+        if cleaned and not tostring(cleaned):lower():find("level") then
+            return cleaned
+        end
+    end
+    return State.farmEnemy
+end
+
+local function forEachZoneNpc(fn)
+    local zones = workspace:FindFirstChild("NPC Zones")
+    if not zones then return end
+    for _, zone in ipairs(zones:GetChildren()) do
+        local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs")
+        if npcs then
+            for _, m in ipairs(npcs:GetChildren()) do
+                fn(m)
+            end
+        else
+            for _, m in ipairs(zone:GetDescendants()) do
+                if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
+                    fn(m)
+                end
+            end
+        end
+    end
 end
 
 local function findNearestEnemyModel(targetName)
@@ -2824,7 +2871,7 @@ local function findNearestEnemyModel(targetName)
     if not from then return nil end
 
     local best, bestDist, bestPos = nil, math.huge, nil
-    local function consider(m)
+    forEachZoneNpc(function(m)
         if not m:IsA("Model") then return end
         if not npcNameMatches(m.Name, keys) then return end
         local hum = m:FindFirstChildOfClass("Humanoid")
@@ -2837,19 +2884,7 @@ local function findNearestEnemyModel(targetName)
             best = m
             bestPos = piv
         end
-    end
-
-    local zones = workspace:FindFirstChild("NPC Zones")
-    if zones then
-        for _, zone in ipairs(zones:GetChildren()) do
-            local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs")
-            if npcs then
-                for _, m in ipairs(npcs:GetChildren()) do
-                    consider(m)
-                end
-            end
-        end
-    end
+    end)
     return best, bestPos, bestDist
 end
 
@@ -3463,17 +3498,18 @@ refreshPanel()
 --------------------------------------------------------------------
 -- Loops
 --------------------------------------------------------------------
--- Auto Farm: BV to enemy, virtual Mouse.Hit aim (no OS cursor move), FireServer skills.
--- Leave Physical M1 OFF so you can freely use your mouse while it farms.
+-- Auto Farm: find live NPC â†’ BV hover + skills.
+-- If none streamed yet, BV to nearest quest pad / stand so enemies can load in.
 task.spawn(function()
     local lastFly = 0
+    local lastPanel = 0
     while UI.alive do
         if State.autoFarm then
             local targetName = farmTargetName()
-            if targetName then
+            local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if targetName and hrp then
                 local npc, pos, dist = findNearestEnemyModel(targetName)
-                local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-                if npc and pos and hrp then
+                if npc and pos then
                     local hover = pos + Vector3.new(0, State.farmHeight or 8, 0)
                     local range = State.farmRange or 25
 
@@ -3497,7 +3533,6 @@ task.spawn(function()
                         npc, pos, dist = findNearestEnemyModel(targetName)
                         if npc and pos then
                             local aimPos = pos + Vector3.new(0, 2, 0)
-                            -- keep virtual aim fresh for skill scripts (never moves OS mouse)
                             setVirtualAim(aimPos, npc)
 
                             local now = tick()
@@ -3513,21 +3548,45 @@ task.spawn(function()
                             local hum = npc:FindFirstChildOfClass("Humanoid")
                             local hp = hum and math.floor(hum.Health) or 0
                             State.status = string.format("%s Â· %dhp Â· %.0fd", targetName, hp, dist or 0)
-                        else
-                            clearVirtualAim()
-                            State.status = "no " .. tostring(targetName)
                         end
                     end
-                elseif not targetName then
-                    clearVirtualAim()
-                    State.status = "no farm target"
                 else
+                    -- No live NPC streamed â€” travel to pad / stand for this target
                     clearVirtualAim()
-                    State.status = "no " .. tostring(targetName)
+                    if tick() - lastFly > 0.9 then
+                        lastFly = tick()
+                        local stand, err, _, kind, dist0 = questKillStand(targetName)
+                        if stand then
+                            State.status = string.format("goto Â· %s Â· %.0fd", tostring(kind or "pad"), dist0 or 0)
+                            local ok, _, cache = bvFlyTo(stand + Vector3.new(0, State.farmHeight or 8, 0), {
+                                speed = 900,
+                                arrive = 14,
+                                keepNoclip = true,
+                                cancel = function()
+                                    return not State.autoFarm or not UI.alive
+                                end,
+                            })
+                            if cache then _farmNoclipCache = cache end
+                            if not ok then
+                                State.status = "travel fail Â· " .. tostring(targetName)
+                            end
+                        else
+                            State.status = "no " .. tostring(targetName)
+                        end
+                    else
+                        State.status = "seek Â· " .. tostring(targetName)
+                    end
                 end
-            else
+            elseif not targetName then
                 clearVirtualAim()
                 State.status = "no farm target"
+            else
+                clearVirtualAim()
+                State.status = "no character"
+            end
+            if tick() - lastPanel > 1.0 then
+                lastPanel = tick()
+                pcall(refreshPanel)
             end
             task.wait(0.08)
         else
