@@ -2580,6 +2580,17 @@ local function matchSpawn(location)
     return nil
 end
 
+local function spawnSetterPosition(spawnName)
+    if not spawnName then return nil end
+    local root = workspace:FindFirstChild("Npc_Workspace")
+        or workspace:FindFirstChild("NPC_Workspace")
+    local folder = root and root:FindFirstChild("Spawn Setters")
+    local m = folder and folder:FindFirstChild(spawnName)
+    if not m then return nil end
+    local part = m:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
 local function warpTo(spawnName)
     if not spawnName then return false, "no spawn" end
     local ok1, e1 = pcall(function()
@@ -2833,6 +2844,36 @@ local function cleanEnemyName(name)
     return m
 end
 
+-- Match a quest option to the current farm target (e.g. Revolutionary → Revolutionary Elite @ Base)
+local function questOptForTarget(targetName)
+    local key = tostring(targetName or ""):lower():gsub("%s+$", "")
+    if key == "" then return bestQuest() end
+    local hit = nil
+    for _, opt in ipairs(allOptions()) do
+        local cleaned = cleanEnemyName(opt.target)
+        if cleaned then
+            local n = cleaned:lower()
+            if n == key or n:find(key, 1, true) or key:find(n, 1, true) then
+                if not hit or opt.level > hit.level then
+                    hit = opt
+                end
+            end
+        end
+    end
+    return hit or bestQuest()
+end
+
+local function questIslandStand(opt)
+    opt = opt or bestQuest()
+    if not opt then return nil, "no quest" end
+    local spawn = matchSpawn(opt.location)
+    local pos = spawn and spawnSetterPosition(spawn)
+    if not pos then
+        return nil, "no spawn part for " .. tostring(opt.location)
+    end
+    return pos + Vector3.new(0, 6, 0), spawn, opt
+end
+
 -- Live quest values (text labels often stay stale after turn-in / clear)
 local function questValues()
     local handler = QuestGui and QuestGui:FindFirstChild("QuestHandler")
@@ -3012,9 +3053,9 @@ local function safeStandForPad(pad, targetName)
 end
 
 -- Name aliases. Holy Soldier ≠ Divine Soldier (different pads/heights).
--- Only alias when names are truly interchangeable.
 local QUEST_NPC_ALIASES = {
-    -- none for holy/divine — keep them separate
+    ["revolutionary"] = { "revolutionary elite", "revolutionary" },
+    ["revolutionarys"] = { "revolutionary elite", "revolutionary" },
 }
 
 local function questTargetKeys(targetName)
@@ -3464,15 +3505,19 @@ local function farmTargetName()
     if State.farmMode == "Selected Enemy" then
         return State.farmEnemy
     end
-    -- Active Kill-quest NPC, else best quest for your level (e.g. Holy Soldier @ 1050)
     local fromGui = currentQuestTarget()
-    if fromGui then return fromGui end
     local best = bestQuest()
-    if best and best.target then
-        local cleaned = cleanEnemyName(best.target)
-        if cleaned and not tostring(cleaned):lower():find("level") then
-            return cleaned
+    local bestTarget = best and cleanEnemyName(best.target)
+    -- GUI often shortens ("Revolutionarys") while folder is "Revolutionary Elite"
+    if fromGui and bestTarget then
+        local g, b = tostring(fromGui):lower(), tostring(bestTarget):lower()
+        if g == b or b:find(g, 1, true) or g:find(b, 1, true) then
+            return bestTarget
         end
+    end
+    if fromGui then return fromGui end
+    if bestTarget and not tostring(bestTarget):lower():find("level") then
+        return bestTarget
     end
     return State.farmEnemy
 end
@@ -4445,8 +4490,30 @@ task.spawn(function()
                                 )
                             end
                         else
-                            stopFarmHold()
-                            State.status = "no pad · " .. tostring(targetName)
+                            -- No Observation pad: BV-fly to this quest's island spawn
+                            local islandStand, spawnName = questIslandStand(questOptForTarget(targetName))
+                            if islandStand and tick() - lastFly > 1.2 then
+                                lastFly = tick()
+                                _forceFarmRepath = false
+                                State.status = "island · " .. tostring(spawnName or targetName)
+                                local ok, _, cache = bvFlyTo(islandStand, {
+                                    speed = 750,
+                                    arrive = 18,
+                                    keepNoclip = true,
+                                    cancel = function()
+                                        return not State.autoFarm or not UI.alive
+                                    end,
+                                })
+                                if cache then _farmNoclipCache = cache end
+                                if not ok then
+                                    State.status = "island fail · " .. tostring(spawnName)
+                                end
+                            elseif not islandStand then
+                                stopFarmHold()
+                                State.status = "no pad · " .. tostring(targetName)
+                            else
+                                State.status = "seek island · " .. tostring(targetName)
+                            end
                         end
                     end
                 elseif not targetName then
