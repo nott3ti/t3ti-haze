@@ -2183,6 +2183,18 @@ local State = {
     lastFruit = 0,
     status = "ready",
     bestLabel = "-",
+    -- Auto Farm
+    autoFarm = false,
+    farmSkills = true,
+    farmClick = true,
+    farmMode = "Quest Target", -- or "Selected Enemy"
+    farmEnemy = "Holy Soldier",
+    farmRange = 25,
+    farmSkillCd = 1.2,
+    lastFarmSkill = 0,
+    lastFarmClick = 0,
+    farmHeight = 8,
+    useAllSkills = false,
 }
 
 local function notify(t, b, k)
@@ -2597,7 +2609,6 @@ end
   Fast noclip BV fly â€” matches working Haze Seas tweens we probed:
   - CanCollide=false on ALL character parts (through walls)
   - BodyVelocity + BodyGyro on HRP (NOT Anchored, NOT CFrame teleport)
-  - Cobalt won't show this: no remotes, only physics movers
 ]]
 local _questFlyToken = 0
 local function setNoclip(char, on, cache)
@@ -2617,17 +2628,19 @@ local function setNoclip(char, on, cache)
     return cache
 end
 
-local function slowTweenToQuestTarget()
+local function bvFlyTo(goal, opts)
+    opts = opts or {}
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum then return false, "no character" end
-
-    local stand, countOrErr, targetName, kind, dist0 = questKillStand()
-    if not stand then return false, countOrErr end
+    if not hrp or typeof(goal) ~= "Vector3" then
+        return false, "no character/goal"
+    end
 
     _questFlyToken += 1
     local token = _questFlyToken
+    local speed = opts.speed or 900
+    local arrive = opts.arrive or 12
+    local keepNoclip = opts.keepNoclip == true
 
     for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro" }) do
         local old = hrp:FindFirstChild(n)
@@ -2651,14 +2664,13 @@ local function slowTweenToQuestTarget()
     bg.CFrame = hrp.CFrame
     bg.Parent = hrp
 
-    local speed = 900
-    local arrive = 12
+    local dist0 = (goal - hrp.Position).Magnitude
     local t0 = tick()
-    local maxT = math.clamp((dist0 or 200) / speed + 4, 3, 25)
+    local maxT = math.clamp(dist0 / speed + 4, 3, 25)
     local okArrive = false
-    local goal = stand
 
     while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
+        if opts.cancel and opts.cancel() then break end
         local pos = hrp.Position
         local delta = goal - pos
         local dist = delta.Magnitude
@@ -2666,12 +2678,11 @@ local function slowTweenToQuestTarget()
             okArrive = true
             break
         end
-        local dir = delta.Unit
         local v = speed
         if dist < 60 then
             v = math.max(80, speed * (dist / 60))
         end
-        bv.Velocity = dir * v
+        bv.Velocity = delta.Unit * v
         bg.CFrame = CFrame.lookAt(pos, Vector3.new(goal.X, pos.Y, goal.Z))
         RunService.Heartbeat:Wait()
     end
@@ -2681,28 +2692,138 @@ local function slowTweenToQuestTarget()
         bv:Destroy()
         bg:Destroy()
     end)
-    setNoclip(char, false, collCache)
+    if not keepNoclip then
+        setNoclip(char, false, collCache)
+    end
 
     if token ~= _questFlyToken then
-        return false, "cancelled"
+        return false, "cancelled", collCache
     end
-
-    task.wait(0.25)
     local settle = (hrp.Position - goal).Magnitude
     if not okArrive and settle > 40 then
-        return false, "timeout Â· " .. tostring(kind)
+        return false, "timeout", collCache
     end
-    if settle > 50 then
-        return false, "rubberband Â· try again"
+    return settle <= 50, settle <= 50 and "ok" or "rubberband", collCache
+end
+
+local function slowTweenToQuestTarget()
+    local stand, countOrErr, targetName, kind, dist0 = questKillStand()
+    if not stand then return false, countOrErr end
+    local ok, info = bvFlyTo(stand, { speed = 900, arrive = 12 })
+    if not ok then return false, tostring(info) .. " Â· " .. tostring(kind) end
+    return true, string.format("%s Â· BV-noclip Â· %s Â· %.0f studs", tostring(targetName), tostring(kind), dist0 or 0)
+end
+
+-- Enemy name list from streamed NPC Zones
+local function listEnemyNames()
+    local seen, names = {}, {}
+    local zones = workspace:FindFirstChild("NPC Zones")
+    if zones then
+        for _, zone in ipairs(zones:GetChildren()) do
+            local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs")
+            if npcs then
+                for _, m in ipairs(npcs:GetChildren()) do
+                    if m:IsA("Model") then
+                        local base = m.Name:gsub("%d+$", ""):gsub("%s+$", "")
+                        if base ~= "" and not seen[base] then
+                            seen[base] = true
+                            names[#names + 1] = base
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(names)
+    if #names == 0 then
+        names = { "Holy Soldier", "Divine Soldier", "Marine Captain", "Marine Grunt" }
+    end
+    return names
+end
+
+local function farmTargetName()
+    if State.farmMode == "Selected Enemy" then
+        return State.farmEnemy
+    end
+    return currentQuestTarget() or State.farmEnemy
+end
+
+local function findNearestEnemyModel(targetName)
+    targetName = targetName or farmTargetName()
+    if not targetName then return nil end
+    local keys = questTargetKeys(targetName)
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    local from = hrp and hrp.Position
+    if not from then return nil end
+
+    local best, bestDist, bestPos = nil, math.huge, nil
+    local function consider(m)
+        if not m:IsA("Model") then return end
+        if not npcNameMatches(m.Name, keys) then return end
+        local hum = m:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+        local ok, piv = pcall(function() return m:GetPivot().Position end)
+        if not ok or not piv then return end
+        local d = (piv - from).Magnitude
+        if d < bestDist then
+            bestDist = d
+            best = m
+            bestPos = piv
+        end
     end
 
-    return true, string.format(
-        "%s Â· %.1fs Â· BV-noclip Â· %s Â· %.0f studs",
-        tostring(targetName),
-        tick() - t0,
-        tostring(kind),
-        dist0 or 0
-    )
+    local zones = workspace:FindFirstChild("NPC Zones")
+    if zones then
+        for _, zone in ipairs(zones:GetChildren()) do
+            local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs")
+            if npcs then
+                for _, m in ipairs(npcs:GetChildren()) do
+                    consider(m)
+                end
+            end
+        end
+    end
+    return best, bestPos, bestDist
+end
+
+local function aimAtWorld(pos)
+    local cam = workspace.CurrentCamera
+    if not cam or typeof(pos) ~= "Vector3" then return false end
+    local screen, onScreen = cam:WorldToViewportPoint(pos)
+    if type(mousemoveabs) == "function" then
+        pcall(mousemoveabs, screen.X, screen.Y)
+        return onScreen
+    end
+    return false
+end
+
+local function farmClick()
+    if type(mouse1click) == "function" then
+        pcall(mouse1click)
+        return true
+    end
+    return false
+end
+
+local function castFarmSkills()
+    if State.useAllSkills then
+        local names = skillRemoteNames()
+        for _, n in ipairs(names) do
+            castSkill(n)
+            task.wait(0.05)
+        end
+        return
+    end
+    castSkill(State.skillName)
+end
+
+local _farmNoclipCache = nil
+local function stopFarmNoclip()
+    local char = LP.Character
+    if char and _farmNoclipCache then
+        setNoclip(char, false, _farmNoclipCache)
+    end
+    _farmNoclipCache = nil
 end
 
 -- Tween to safe perch, aim mouse at pad center, cast Sea Rift
@@ -2864,6 +2985,75 @@ do
     end)
 end
 
+-- Farm
+do
+    local tab = win:Tab("Farm")
+    local s1 = tab:Section("Auto Farm")
+    s1:Label("BV fly + skill remotes (no 1st person)")
+    s1:Toggle("Auto Farm", false, function(v)
+        State.autoFarm = v
+        if not v then
+            stopFarmNoclip()
+            State.status = "farm off"
+        else
+            State.status = "farm on"
+        end
+        notify("Farm", v and "ON" or "OFF", v and "good" or "bad")
+    end)
+    s1:Toggle("Skills on Target", true, function(v)
+        State.farmSkills = v
+    end)
+    s1:Toggle("Spoof M1 Click", true, function(v)
+        State.farmClick = v
+    end)
+    s1:Toggle("Auto Accept Quest", true, function(v)
+        State.autoAccept = v
+    end)
+end
+
+-- Specify (what to farm / which skills)
+do
+    local tab = win:Tab("Specify")
+    local enemies = listEnemyNames()
+    if not table.find(enemies, State.farmEnemy) then
+        State.farmEnemy = enemies[1]
+    end
+    local skills = skillRemoteNames()
+    if #skills == 0 then skills = { "Sea Rift" } end
+    if not table.find(skills, State.skillName) then
+        State.skillName = skills[1]
+    end
+
+    local s1 = tab:Section("Target")
+    s1:Dropdown("Farm Mode", { "Quest Target", "Selected Enemy" }, State.farmMode, function(v)
+        State.farmMode = v
+        notify("Farm", "mode Â· " .. v, "good")
+    end)
+    s1:Dropdown("Enemy", enemies, State.farmEnemy, function(v)
+        State.farmEnemy = v
+    end)
+    s1:Button("Refresh Enemy List", function()
+        notify("Farm", "re-exec script to refresh dropdown", "good")
+    end)
+
+    local s2 = tab:Section("Skills")
+    s2:Dropdown("Skill", skills, State.skillName, function(v)
+        State.skillName = v
+    end)
+    s2:Toggle("Use All Fruit Skills", false, function(v)
+        State.useAllSkills = v
+    end)
+    s2:Slider("Skill CD", 12, 3, 50, "x100ms", function(v)
+        State.farmSkillCd = v / 10
+    end)
+    s2:Slider("Attack Range", 25, 10, 80, "studs", function(v)
+        State.farmRange = v
+    end)
+    s2:Slider("Hover Height", 8, 0, 40, "studs", function(v)
+        State.farmHeight = v
+    end)
+end
+
 -- Stats
 do
     local tab = win:Tab("Stats")
@@ -2935,6 +3125,8 @@ do
         State.autoAccept = false
         State.autoFruit = false
         State.autoSkill = false
+        State.autoFarm = false
+        stopFarmNoclip()
         State.status = "unloaded"
         notify("T3ti", "unloading...", "bad")
         task.defer(function()
@@ -3040,6 +3232,8 @@ function refreshPanel()
         { left = "Next", right = nxt and nxt.key or "-", color = UI.Theme.textDim },
         { left = "AutoAcc", right = State.autoAccept and "ON" or "OFF",
           color = State.autoAccept and UI.Theme.good or UI.Theme.bad },
+        { left = "Farm", right = State.autoFarm and "ON" or "OFF",
+          color = State.autoFarm and UI.Theme.good or UI.Theme.bad },
         { left = "Status", right = tostring(State.status):sub(1, 20), color = UI.Theme.accent },
     })
     questPanel.title = "(" .. userName .. ") Quest"
@@ -3077,6 +3271,76 @@ refreshPanel()
 --------------------------------------------------------------------
 -- Loops
 --------------------------------------------------------------------
+-- Auto Farm: BV to enemy, aim mouse at them, FireServer skills + optional M1.
+-- Never locks first-person â€” NS Hub does that so Mouse.Hit lines up; we spoof
+-- cursor with mousemoveabs and fire fruit remotes directly instead.
+task.spawn(function()
+    local lastFly = 0
+    while UI.alive do
+        if State.autoFarm then
+            local targetName = farmTargetName()
+            if targetName then
+                local npc, pos, dist = findNearestEnemyModel(targetName)
+                local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                if npc and pos and hrp then
+                    local hover = pos + Vector3.new(0, State.farmHeight or 8, 0)
+                    local range = State.farmRange or 25
+
+                    if dist > range + 8 and tick() - lastFly > 0.35 then
+                        lastFly = tick()
+                        State.status = "fly Â· " .. tostring(targetName)
+                        local ok, _, cache = bvFlyTo(hover, {
+                            speed = 900,
+                            arrive = math.max(8, range * 0.45),
+                            keepNoclip = true,
+                            cancel = function()
+                                return not State.autoFarm or not UI.alive
+                            end,
+                        })
+                        if cache then _farmNoclipCache = cache end
+                    elseif not _farmNoclipCache and LP.Character then
+                        _farmNoclipCache = setNoclip(LP.Character, true, {})
+                    end
+
+                    if State.autoFarm then
+                        npc, pos, dist = findNearestEnemyModel(targetName)
+                        if npc and pos then
+                            -- Spoof aim: move OS cursor onto NPC (keeps 3rd person)
+                            aimAtWorld(pos + Vector3.new(0, 2, 0))
+
+                            local now = tick()
+                            if State.farmClick and now - State.lastFarmClick >= 0.12 then
+                                State.lastFarmClick = now
+                                farmClick()
+                            end
+                            if State.farmSkills and now - State.lastFarmSkill >= (State.farmSkillCd or 1.2) then
+                                State.lastFarmSkill = now
+                                castFarmSkills()
+                            end
+
+                            local hum = npc:FindFirstChildOfClass("Humanoid")
+                            local hp = hum and math.floor(hum.Health) or 0
+                            State.status = string.format("%s Â· %dhp Â· %.0fd", targetName, hp, dist or 0)
+                        else
+                            State.status = "no " .. tostring(targetName)
+                        end
+                    end
+                elseif not targetName then
+                    State.status = "no farm target"
+                else
+                    State.status = "no " .. tostring(targetName)
+                end
+            else
+                State.status = "no farm target"
+            end
+            task.wait(0.08)
+        else
+            task.wait(0.25)
+        end
+    end
+    stopFarmNoclip()
+end)
+
 task.spawn(function()
     while UI.alive do
         local now = tick()
@@ -3100,7 +3364,7 @@ task.spawn(function()
                 dumpFruit(math.min(5, math.floor(v.Value)))
             end
         end
-        if State.autoSkill and now - State.lastSkill >= State.skillCd then
+        if State.autoSkill and not State.autoFarm and now - State.lastSkill >= State.skillCd then
             State.lastSkill = now
             castSkill(State.skillName)
         end
