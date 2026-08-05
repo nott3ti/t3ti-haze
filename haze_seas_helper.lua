@@ -81,16 +81,18 @@ local State = {
     -- Auto Farm
     autoFarm = false,
     farmSkills = true,
-    farmClick = false, -- physical mouse1click — keep off so you can use your mouse
+    farmM1 = true, -- in-game tool:Activate — works unfocused, mouse stays free
+    farmClick = false, -- OS mouse1click — NEVER needed; clicks outside Roblox
     farmMode = "Quest Target", -- or "Selected Enemy"
     farmEnemy = "Holy Soldier",
     farmRange = 25,
     farmSkillCd = 0.85,
     lastFarmSkill = 0,
     lastFarmClick = 0,
+    lastFarmM1 = 0,
     farmHeight = 8,
-    useAllSkills = true, -- cast every equipped fruit skill (Configuration / keybound)
-    skillRotate = 1,
+    skillEnabled = {}, -- [skillName] = true/false — Specify inventory picks
+    m1Tool = "Auto", -- Auto = match equipped fruit name; else Backpack tool name
 }
 
 local function notify(t, b, k)
@@ -292,8 +294,73 @@ end
 local function fruitFolder()
     local fp = PG:FindFirstChild("FruitPowers")
     if not fp then return nil end
-    -- whatever fruit the player currently has equipped
+    -- whatever fruit folder is currently loaded (= equipped fruit)
     return fp:GetChildren()[1]
+end
+
+local function currentFruitName()
+    local f = fruitFolder()
+    return f and f.Name or nil
+end
+
+-- Combat / fruit / sword tools in Character + Backpack
+local function inventoryToolNames()
+    local names, seen = {}, {}
+    local function add(container)
+        if not container then return end
+        for _, t in ipairs(container:GetChildren()) do
+            if t:IsA("Tool") and not seen[t.Name] then
+                seen[t.Name] = true
+                names[#names + 1] = t.Name
+            end
+        end
+    end
+    add(LP.Character)
+    add(LP:FindFirstChild("Backpack"))
+    table.sort(names)
+    return names
+end
+
+local function findToolByName(name)
+    if not name or name == "" or name == "Auto" then return nil end
+    local char = LP.Character
+    local bp = LP:FindFirstChild("Backpack")
+    return (char and char:FindFirstChild(name))
+        or (bp and bp:FindFirstChild(name))
+end
+
+-- M1 tool: Auto → tool named like current fruit, else held tool, else Combat
+local function resolveM1Tool()
+    local char = LP.Character
+    local pick = State.m1Tool
+    if pick and pick ~= "Auto" then
+        local t = findToolByName(pick)
+        if t then return t end
+    end
+    local fruit = currentFruitName()
+    if fruit then
+        local t = findToolByName(fruit)
+        if t then return t end
+    end
+    if char then
+        local held = char:FindFirstChildOfClass("Tool")
+        if held then return held end
+    end
+    return findToolByName("Combat") or findToolByName("Katana")
+end
+
+local function ensureM1ToolEquipped()
+    local tool = resolveM1Tool()
+    if not tool then return nil end
+    local char = LP.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if char and hum and tool.Parent ~= char then
+        pcall(function()
+            hum:EquipTool(tool)
+        end)
+        tool = char:FindFirstChild(tool.Name) or tool
+    end
+    return tool
 end
 
 -- All fruit remotes (minus *2 variants)
@@ -311,7 +378,7 @@ local function skillRemoteNames()
     return names
 end
 
--- Skills the player actually has on this fruit (Configuration + KeyString)
+-- Skills on the CURRENT fruit (Configuration = owned/equipped moves)
 local function equippedSkillNames()
     local fruit = fruitFolder()
     if not fruit then return {} end
@@ -333,6 +400,26 @@ local function equippedSkillNames()
         return skillRemoteNames()
     end
     return names
+end
+
+local function ensureSkillDefaults()
+    for _, n in ipairs(equippedSkillNames()) do
+        if State.skillEnabled[n] == nil then
+            State.skillEnabled[n] = true
+        end
+    end
+end
+
+-- Skills ticked in Specify (new skills default ON)
+local function selectedSkillNames()
+    ensureSkillDefaults()
+    local out = {}
+    for _, n in ipairs(equippedSkillNames()) do
+        if State.skillEnabled[n] ~= false then
+            out[#out + 1] = n
+        end
+    end
+    return out
 end
 
 local function castSkill(name)
@@ -366,6 +453,20 @@ local function castSkill(name)
         return ok, err
     end
     return false, "skill remote missing"
+end
+
+-- In-game M1 via fruit/weapon tool Activate — no OS click, mouse stays free
+local function doFarmM1()
+    if UI.uiVisible or UI._booting then
+        return false
+    end
+    local tool = ensureM1ToolEquipped()
+    if not tool then
+        return false
+    end
+    return (pcall(function()
+        tool:Activate()
+    end))
 end
 
 -- Normalize quest-option folder names into an NPC search string
@@ -867,7 +968,7 @@ local function faceWorld(pos)
 end
 
 local function farmClick()
-    -- Physical OS click — avoid while you want free mouse control
+    -- OS-level click — only if user explicitly enables it (clicks outside Roblox too)
     if UI.uiVisible or UI._booting then
         return false
     end
@@ -887,25 +988,15 @@ local function castFarmSkills(aimPos, aimTarget)
         setVirtualAim(aimPos, aimTarget)
         faceWorld(aimPos)
     end
-    local equipped = equippedSkillNames()
-    if #equipped == 0 then
-        castSkill(State.skillName)
+    -- make sure fruit/weapon tool is out so skill remotes register
+    ensureM1ToolEquipped()
+    local picks = selectedSkillNames()
+    if #picks == 0 then
         return
     end
-    if State.useAllSkills then
-        -- fire every equipped fruit skill (what you actually have bound)
-        for _, n in ipairs(equipped) do
-            castSkill(n)
-            task.wait(0.08)
-        end
-    else
-        -- single selected skill, keep selection valid against equipped list
-        local name = State.skillName
-        if not table.find(equipped, name) then
-            name = equipped[1]
-            State.skillName = name
-        end
-        castSkill(name)
+    for _, n in ipairs(picks) do
+        castSkill(n)
+        task.wait(0.08)
     end
 end
 
@@ -1104,10 +1195,14 @@ do
     s1:Toggle("Skills on Target", true, function(v)
         State.farmSkills = v
     end)
-    s1:Toggle("Physical M1 Click", false, function(v)
+    s1:Toggle("In-Game M1 (Activate)", true, function(v)
+        State.farmM1 = v
+        notify("Farm", v and "M1 · tool Activate (mouse free)" or "M1 off", v and "good" or "bad")
+    end)
+    s1:Toggle("OS Mouse Click (bad)", false, function(v)
         State.farmClick = v
         if v then
-            notify("Farm", "M1 uses real cursor — leave OFF to free mouse", "bad")
+            notify("Farm", "OS click steals mouse / clicks outside Roblox", "bad")
         end
     end)
     s1:Toggle("Auto Accept Quest", true, function(v)
@@ -1122,11 +1217,21 @@ do
     if not table.find(enemies, State.farmEnemy) then
         State.farmEnemy = enemies[1]
     end
+    ensureSkillDefaults()
     local skills = equippedSkillNames()
     if #skills == 0 then skills = skillRemoteNames() end
-    if #skills == 0 then skills = { "Sea Rift" } end
-    if not table.find(skills, State.skillName) then
+    if #skills == 0 then skills = { "(no fruit skills)" } end
+    if not table.find(skills, State.skillName) and skills[1] then
         State.skillName = skills[1]
+    end
+
+    local toolNames = inventoryToolNames()
+    local m1Choices = { "Auto" }
+    for _, n in ipairs(toolNames) do
+        m1Choices[#m1Choices + 1] = n
+    end
+    if not table.find(m1Choices, State.m1Tool) then
+        State.m1Tool = "Auto"
     end
 
     local s1 = tab:Section("Target")
@@ -1141,16 +1246,35 @@ do
         notify("Farm", "re-exec script to refresh dropdown", "good")
     end)
 
-    local s2 = tab:Section("Skills")
-    s2:Label("Equipped: " .. table.concat(skills, ", "))
-    s2:Dropdown("Single Skill", skills, State.skillName, function(v)
-        State.skillName = v
-        State.useAllSkills = false
+    local sWep = tab:Section("Weapon / Fruit")
+    sWep:Label("Fruit: " .. tostring(currentFruitName() or "none"))
+    sWep:Dropdown("M1 Tool", m1Choices, State.m1Tool, function(v)
+        State.m1Tool = v
+        notify("M1", v == "Auto" and ("auto · " .. tostring(currentFruitName() or "?")) or v, "good")
     end)
-    s2:Toggle("Use All Equipped Skills", true, function(v)
-        State.useAllSkills = v
-        notify("Skills", v and ("all · " .. #equippedSkillNames()) or State.skillName, "good")
+    sWep:Label("Auto = tool matching your equipped fruit name")
+
+    local s2 = tab:Section("Skill Inventory")
+    s2:Label("Tick skills to use while farming")
+    s2:Button("Enable All Skills", function()
+        for _, n in ipairs(equippedSkillNames()) do
+            State.skillEnabled[n] = true
+        end
+        notify("Skills", "all enabled", "good")
     end)
+    s2:Button("Disable All Skills", function()
+        for _, n in ipairs(equippedSkillNames()) do
+            State.skillEnabled[n] = false
+        end
+        notify("Skills", "all disabled", "bad")
+    end)
+    for _, skillName in ipairs(equippedSkillNames()) do
+        local sn = skillName
+        local on = State.skillEnabled[sn] ~= false
+        s2:Toggle(sn, on, function(v)
+            State.skillEnabled[sn] = v
+        end)
+    end
     s2:Slider("Skill CD", 8, 3, 50, "x100ms", function(v)
         State.farmSkillCd = v / 10
     end)
@@ -1434,6 +1558,12 @@ task.spawn(function()
                             setVirtualAim(aimPos, npc)
 
                             local now = tick()
+                            -- In-game M1 (tool Activate) — works without Roblox focus, no OS mouse steal
+                            if State.farmM1 and now - State.lastFarmM1 >= 0.12 then
+                                State.lastFarmM1 = now
+                                doFarmM1()
+                            end
+                            -- OS click only if user forced it on (not recommended)
                             if State.farmClick and now - State.lastFarmClick >= 0.12 then
                                 State.lastFarmClick = now
                                 farmClick()
@@ -1445,7 +1575,8 @@ task.spawn(function()
 
                             local hum = npc:FindFirstChildOfClass("Humanoid")
                             local hp = hum and math.floor(hum.Health) or 0
-                            State.status = string.format("%s · %dhp · %.0fd", targetName, hp, dist or 0)
+                            local fruit = currentFruitName() or "?"
+                            State.status = string.format("%s · %s · %dhp · %.0fd", fruit, targetName, hp, dist or 0)
                         end
                     end
                 else
