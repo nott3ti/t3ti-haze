@@ -3003,15 +3003,39 @@ local function bvFlyTo(goal, opts)
 
         local dir = delta.Unit
         local v = speed
-        if stuckFor >= 6 or lifting > 0 then
-            lifting = math.max(lifting - 1, stuckFor >= 6 and 18 or lifting)
+        local above = pos.Y - goal.Y
+
+        -- if we got yeeted into the sky, dive back to the goal â€” never keep lifting
+        if above > 35 then
+            lifting = 0
             stuckFor = 0
-            local liftGoal = pos + Vector3.new(0, 22, 0) + dir * 18
-            local liftDelta = liftGoal - pos
-            if liftDelta.Magnitude > 1e-3 then
-                dir = liftDelta.Unit
+            dir = delta.Unit
+            v = speed
+        elseif stuckFor >= 8 then
+            lifting = 10
+            stuckFor = 0
+        end
+
+        if lifting > 0 then
+            lifting -= 1
+            local maxLiftY = goal.Y + 25
+            if pos.Y >= maxLiftY then
+                lifting = 0
+                dir = delta.Unit
+            else
+                -- brief hop over obstacle, still biased toward goal
+                local hop = Vector3.new(
+                    pos.X + dir.X * 14,
+                    math.min(pos.Y + 10, maxLiftY),
+                    pos.Z + dir.Z * 14
+                )
+                hop = hop:Lerp(goal, 0.35)
+                local hopDelta = hop - pos
+                if hopDelta.Magnitude > 1e-3 then
+                    dir = hopDelta.Unit
+                end
+                v = math.clamp(speed * 0.7, 200, 600)
             end
-            v = math.clamp(speed * 0.85, 280, 750)
         elseif dist < 35 then
             v = math.clamp(speed * (dist / 35), 140, speed)
         end
@@ -3904,11 +3928,13 @@ task.spawn(function()
                     local stand = farmStandPos(pos, targetName, hrp.Position)
                     local melee = State.farmMelee or 6
                     local fdist = flatDist(hrp.Position, pos)
+                    local dy = hrp.Position.Y - pos.Y
 
-                    if fdist > melee + 1.5 or math.abs(hrp.Position.Y - pos.Y) > 6 then
+                    -- if stuck in the sky / wrong height, always repath down to stand
+                    if fdist > melee + 1.5 or math.abs(dy) > 6 then
                         if tick() - lastFly > 0.3 then
                             lastFly = tick()
-                            State.status = string.format("close Â· %.0fd", fdist)
+                            State.status = string.format("close Â· flat%.0f Â· dy%.0f", fdist, dy)
                             local ok, _, cache = bvFlyTo(stand, {
                                 speed = 950,
                                 arrive = math.max(2.5, melee * 0.35),
