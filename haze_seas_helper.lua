@@ -106,24 +106,6 @@ local function charHakiFlags(char)
     }
 end
 
-local function ensureAutoHaki()
-    if not (State.autoBuso or State.autoHaki) then return end
-    if tick() - (State.lastHakiToggle or 0) < 0.85 then return end
-    local flags = charHakiFlags()
-    if not flags then return end
-
-    if State.autoBuso and flags.buso and flags.buso.Value ~= true then
-        State.lastHakiToggle = tick()
-        pressAbilityKey(readAbilityKey("HakiBuso", "J"))
-        return
-    end
-    if State.autoHaki and flags.obs and flags.obs.Value ~= true then
-        State.lastHakiToggle = tick()
-        pressAbilityKey(readAbilityKey("HakiObs", "K"))
-        return
-    end
-end
-
 local State = {
     autoAccept = true, -- keep best quest for your level accepted
     autoFruit = false,
@@ -171,10 +153,30 @@ if Persist.autoAccept ~= nil then
     State.autoAccept = Persist.autoAccept and true or false
 end
 getgenv().T3TI_State = State
+getgenv().T3TI_FarmErr = nil
 
 local function savePersist()
     Persist.autoFarm = State.autoFarm and true or false
     Persist.autoAccept = State.autoAccept and true or false
+end
+
+-- MUST be after State (Luau treats earlier refs as a different nil global)
+local function ensureAutoHaki()
+    if not (State.autoBuso or State.autoHaki) then return end
+    if tick() - (State.lastHakiToggle or 0) < 0.85 then return end
+    local flags = charHakiFlags()
+    if not flags then return end
+
+    if State.autoBuso and flags.buso and flags.buso.Value ~= true then
+        State.lastHakiToggle = tick()
+        pressAbilityKey(readAbilityKey("HakiBuso", "J"))
+        return
+    end
+    if State.autoHaki and flags.obs and flags.obs.Value ~= true then
+        State.lastHakiToggle = tick()
+        pressAbilityKey(readAbilityKey("HakiObs", "K"))
+        return
+    end
 end
 
 local function notify(t, b, k)
@@ -600,18 +602,54 @@ local function currentQuestTarget()
     end
 end
 
+local function gameAutoQuestEnabled()
+    local qg = QuestGui
+    if not qg then return false end
+    for _, d in ipairs(qg:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text then
+            local t = tostring(d.Text):lower()
+            if t:find("auto quest") and t:find("enabled") then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function disableGameAutoQuest()
+    if not ToggleAutoQuest then return end
+    for _ = 1, 3 do
+        if not gameAutoQuestEnabled() then return end
+        pcall(function()
+            ToggleAutoQuest:FireServer()
+        end)
+        task.wait(0.2)
+    end
+end
+
 local function ensureBestQuest()
+    disableGameAutoQuest()
+    local best = bestQuest()
+    if not best then
+        local active = currentQuestTarget()
+        return active ~= nil, active or "no quest for level"
+    end
+    local want = cleanEnemyName(best.target) or best.key
     local active = currentQuestTarget()
-    if active then
+    -- Game AutoQuest often locks low-level trash (Bandit) at high level — replace it
+    if active and tostring(active):lower() == tostring(want):lower() then
         return true, active
     end
-    local best = bestQuest()
-    if not best then return false, "no quest for level" end
     local ok, err = acceptQuest(best)
     if ok then
         requestFarmRepath()
+        return true, want
     end
-    return ok, ok and (cleanEnemyName(best.target) or best.key) or err
+    -- accept failed but we still have something
+    if active then
+        return true, active
+    end
+    return false, err or "accept failed"
 end
 
 -- Spawn pad parts live under ObservationHaki SpawnPoints
@@ -1916,162 +1954,155 @@ task.spawn(function()
     local lastFly = 0
     local lastPanel = 0
     while UI.alive do
-        if State.autoFarm then
-            ensureAutoHaki()
-            local targetName = farmTargetName()
-            local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-            if targetName and hrp then
-                local npc, pos, dist = resolveFarmTarget(targetName, hrp)
-                if npc and pos then
-                    local stand = farmStandPos(pos, npc, hrp.Position)
-                    local melee = State.farmMelee or 6
-                    local fdist = flatDist(hrp.Position, pos)
-                    local dy = hrp.Position.Y - pos.Y
-                    local standDist = (hrp.Position - stand).Magnitude
+        local okIter, errIter = pcall(function()
+            getgenv().T3TI_FarmBeat = tick()
+            if State.autoFarm then
+                ensureAutoHaki()
+                local targetName = farmTargetName()
+                local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                if targetName and hrp then
+                    local npc, pos, dist = resolveFarmTarget(targetName, hrp)
+                    if npc and pos then
+                        local stand = farmStandPos(pos, npc, hrp.Position)
+                        local melee = State.farmMelee or 6
+                        local fdist = flatDist(hrp.Position, pos)
+                        local dy = hrp.Position.Y - pos.Y
+                        local standDist = (hrp.Position - stand).Magnitude
 
-                    -- Repath when far OR after a new quest accept. Close = hold only.
-                    local needFly = _forceFarmRepath
-                        or standDist > 16
-                        or fdist > (melee + 8)
-                        or math.abs(dy) > 12
-                    if needFly and tick() - lastFly > 0.8 then
-                        lastFly = tick()
-                        _forceFarmRepath = false
-                        State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
-                        local ok, _, cache = bvFlyTo(stand, {
-                            speed = 700,
-                            arrive = math.max(3.5, melee * 0.45),
-                            keepNoclip = true,
-                            cancel = function()
-                                return not State.autoFarm or not UI.alive
-                            end,
-                        })
-                        if cache then _farmNoclipCache = cache end
-                    end
-
-                    if State.autoFarm then
-                        npc, pos, dist = resolveFarmTarget(targetName, hrp)
-                        if npc and pos then
-                            stand = farmStandPos(pos, npc, hrp.Position)
-                            farmHoldAt(stand, pos)
-                            fdist = flatDist(hrp.Position, pos)
-
-                            local aimPos = pos + Vector3.new(0, 2, 0)
-                            setVirtualAim(aimPos, npc)
-                            faceWorld(pos)
-
-                            local now = tick()
-                            local yOk = math.abs(hrp.Position.Y - pos.Y) <= 8
-                            if State.farmM1 and fdist <= (melee + 2) and yOk and now - State.lastFarmM1 >= 0.09 then
-                                State.lastFarmM1 = now
-                                doFarmM1()
-                            end
-                            if State.farmClick and now - State.lastFarmClick >= 0.12 then
-                                State.lastFarmClick = now
-                                farmClick()
-                            end
-                            if State.farmSkills and now - State.lastFarmSkill >= (State.farmSkillCd or 1.2) then
-                                State.lastFarmSkill = now
-                                castFarmSkills(aimPos, npc)
-                            end
-
-                            local hum = npc:FindFirstChildOfClass("Humanoid")
-                            local hp = hum and math.floor(hum.Health) or 0
-                            local fruit = currentFruitName() or "?"
-                            local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
-                            State.status = string.format(
-                                "%s · %s · %dhp · flat%.0f · %s",
-                                fruit,
-                                targetName,
-                                hp,
-                                fdist or 0,
-                                tool and tool.Name or "no tool"
-                            )
-                        else
-                            clearFarmLock()
-                        end
-                    end
-                else
-                    clearFarmLock()
-                    -- No live NPC yet: fly to pad once, then HOLD still and wait.
-                    clearVirtualAim()
-                    local waitStand, err, _, kind, dist0 = questKillStand(targetName)
-                    if not waitStand then
-                        -- No pads either — warp to quest island so we aren't frozen
-                        local best = bestQuest()
-                        local spawn = best and matchSpawn(best.location)
-                        if spawn and tick() - lastFly > 2.5 then
+                        local needFly = _forceFarmRepath
+                            or standDist > 16
+                            or fdist > (melee + 8)
+                            or math.abs(dy) > 12
+                        if needFly and tick() - lastFly > 0.8 then
                             lastFly = tick()
-                            State.status = "warp · " .. tostring(spawn)
-                            pcall(function()
-                                warpTo(spawn)
-                            end)
-                            requestFarmRepath()
-                            task.wait(1.0)
-                        else
-                            stopFarmHold()
-                            State.status = "no " .. tostring(targetName)
+                            _forceFarmRepath = false
+                            State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
+                            local ok, _, cache = bvFlyTo(stand, {
+                                speed = 700,
+                                arrive = math.max(3.5, melee * 0.45),
+                                keepNoclip = true,
+                                cancel = function()
+                                    return not State.autoFarm or not UI.alive
+                                end,
+                            })
+                            if cache then _farmNoclipCache = cache end
                         end
-                    elseif waitStand then
-                        local wf = flatDist(hrp.Position, waitStand)
-                        local dy = hrp.Position.Y - waitStand.Y
-                        if _forceFarmRepath or wf > 16 or math.abs(dy) > 20 then
-                            if tick() - lastFly > 0.9 then
-                                lastFly = tick()
-                                _forceFarmRepath = false
+
+                        if State.autoFarm then
+                            npc, pos, dist = resolveFarmTarget(targetName, hrp)
+                            if npc and pos then
+                                stand = farmStandPos(pos, npc, hrp.Position)
+                                farmHoldAt(stand, pos)
+                                fdist = flatDist(hrp.Position, pos)
+
+                                local aimPos = pos + Vector3.new(0, 2, 0)
+                                setVirtualAim(aimPos, npc)
+                                faceWorld(pos)
+
+                                local now = tick()
+                                local yOk = math.abs(hrp.Position.Y - pos.Y) <= 8
+                                if State.farmM1 and fdist <= (melee + 2) and yOk and now - State.lastFarmM1 >= 0.09 then
+                                    State.lastFarmM1 = now
+                                    doFarmM1()
+                                end
+                                if State.farmClick and now - State.lastFarmClick >= 0.12 then
+                                    State.lastFarmClick = now
+                                    farmClick()
+                                end
+                                if State.farmSkills and now - State.lastFarmSkill >= (State.farmSkillCd or 1.2) then
+                                    State.lastFarmSkill = now
+                                    castFarmSkills(aimPos, npc)
+                                end
+
+                                local hum = npc:FindFirstChildOfClass("Humanoid")
+                                local hp = hum and math.floor(hum.Health) or 0
+                                local fruit = currentFruitName() or "?"
+                                local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
                                 State.status = string.format(
-                                    "goto · %s · %.0fd",
-                                    tostring(kind or "pad"),
-                                    dist0 or 0
+                                    "%s · %s · %dhp · flat%.0f · %s",
+                                    fruit,
+                                    targetName,
+                                    hp,
+                                    fdist or 0,
+                                    tool and tool.Name or "no tool"
                                 )
-                                local ok, _, cache = bvFlyTo(waitStand, {
-                                    speed = 700,
-                                    arrive = 12,
-                                    keepNoclip = true,
-                                    cancel = function()
-                                        return not State.autoFarm or not UI.alive
-                                    end,
-                                })
-                                if cache then _farmNoclipCache = cache end
-                                if not ok then
-                                    State.status = "travel fail · " .. tostring(targetName)
+                            else
+                                clearFarmLock()
+                            end
+                        end
+                    else
+                        clearFarmLock()
+                        -- No live NPC: fly to Observation pad / hold. Never block on TeleportToHome.
+                        clearVirtualAim()
+                        local waitStand, err, _, kind, dist0 = questKillStand(targetName)
+                        if waitStand then
+                            local wf = flatDist(hrp.Position, waitStand)
+                            local dy = hrp.Position.Y - waitStand.Y
+                            if _forceFarmRepath or wf > 16 or math.abs(dy) > 20 then
+                                if tick() - lastFly > 0.9 then
+                                    lastFly = tick()
+                                    _forceFarmRepath = false
+                                    State.status = string.format(
+                                        "goto · %s · %.0fd",
+                                        tostring(kind or "pad"),
+                                        dist0 or 0
+                                    )
+                                    local ok, _, cache = bvFlyTo(waitStand, {
+                                        speed = 700,
+                                        arrive = 12,
+                                        keepNoclip = true,
+                                        cancel = function()
+                                            return not State.autoFarm or not UI.alive
+                                        end,
+                                    })
+                                    if cache then _farmNoclipCache = cache end
+                                    if not ok then
+                                        State.status = "travel fail · " .. tostring(targetName)
+                                    end
+                                else
+                                    State.status = "seek · " .. tostring(targetName)
                                 end
                             else
-                                State.status = "seek · " .. tostring(targetName)
+                                farmHoldAt(waitStand, waitStand)
+                                State.status = string.format(
+                                    "wait · %s · %s",
+                                    tostring(targetName),
+                                    tostring(kind or "pad")
+                                )
                             end
                         else
-                            farmHoldAt(waitStand, waitStand)
-                            State.status = string.format(
-                                "wait · %s · %s",
-                                tostring(targetName),
-                                tostring(kind or "pad")
-                            )
+                            stopFarmHold()
+                            State.status = "no pad · " .. tostring(targetName)
                         end
                     end
+                elseif not targetName then
+                    clearFarmLock()
+                    stopFarmHold()
+                    clearVirtualAim()
+                    State.status = "no farm target"
+                else
+                    clearFarmLock()
+                    stopFarmHold()
+                    clearVirtualAim()
+                    State.status = "no character"
                 end
-            elseif not targetName then
-                clearFarmLock()
-                stopFarmHold()
-                clearVirtualAim()
-                State.status = "no farm target"
+                if tick() - lastPanel > 1.0 then
+                    lastPanel = tick()
+                    pcall(refreshPanel)
+                end
+                task.wait(0.08)
             else
                 clearFarmLock()
                 stopFarmHold()
-                clearVirtualAim()
-                State.status = "no character"
+                if Aim.on then clearVirtualAim() end
+                ensureAutoHaki()
+                task.wait(0.25)
             end
-            if tick() - lastPanel > 1.0 then
-                lastPanel = tick()
-                pcall(refreshPanel)
-            end
-            task.wait(0.08)
-        else
-            clearFarmLock()
-            stopFarmHold()
-            if Aim.on then clearVirtualAim() end
-            -- still keep haki up even when farm is off, if toggles on
-            ensureAutoHaki()
-            task.wait(0.25)
+        end)
+        if not okIter then
+            State.status = "farm err · " .. tostring(errIter):sub(1, 40)
+            getgenv().T3TI_FarmErr = tostring(errIter)
+            task.wait(0.5)
         end
     end
     clearVirtualAim()
@@ -2084,22 +2115,14 @@ task.spawn(function()
         local now = tick()
         if State.autoAccept and now - State.lastAccept >= State.acceptInterval then
             State.lastAccept = now
-            -- Don't spam InvokeServer if a kill quest is already active — that softlocks movement
-            local active = currentQuestTarget()
-            if not active then
-                local best = bestQuest()
-                if best then
-                    local ok, err = acceptQuest(best)
-                    if ok then
-                        clearFarmLock()
-                        requestFarmRepath()
-                        State.status = "auto " .. best.key
-                        refreshPanel()
-                        notify("Quest", "accepted · " .. tostring(cleanEnemyName(best.target) or best.key), "good")
-                    elseif type(err) == "string" and err ~= "" and not tostring(err):lower():find("already") then
-                        State.status = tostring(err):sub(1, 40)
-                    end
+            local ok, info = ensureBestQuest()
+            if ok and type(info) == "string" then
+                -- only refresh status when we actually changed something meaningful
+                if State.status == "ready" or tostring(State.status):find("quest") or tostring(State.status):find("auto") then
+                    State.status = "quest · " .. info
                 end
+            elseif type(info) == "string" and info ~= "" and not tostring(info):lower():find("already") then
+                -- keep quiet on routine failures
             end
         end
         if State.autoFruit and now - State.lastFruit >= 2 then
