@@ -43,6 +43,7 @@ UI.showCursor = true
 UI.hideSystemCursor = true
 UI.watermark = game.Players.LocalPlayer.Name
 UI.showWatermark = true
+pcall(function() UI:SetFont("UI") end)
 
 --------------------------------------------------------------------
 -- Services / refs
@@ -782,7 +783,8 @@ end
 --------------------------------------------------------------------
 -- UI
 --------------------------------------------------------------------
-local win = UI:Window({ title = "Haze Seas", x = 80, y = 60, w = 310, visible = false })
+local win = UI:Window({ title = "Haze Seas", x = 80, y = 60, w = 360, visible = false })
+pcall(function() UI:AutoScaleFromViewport() end)
 
 -- Quests
 do
@@ -1022,6 +1024,19 @@ do
     end)
     s1:Toggle("UI Sounds", true, function(v)
         UI.soundsEnabled = v
+    end)
+
+    local sVis = tab:Section("Readability")
+    sVis:Dropdown("Font", UI.FONT_NAMES or { "UI", "System", "Plex", "Monospace" }, UI.fontName or "UI", function(v)
+        if UI.SetFont then UI:SetFont(v) end
+        notify("UI", "font · " .. tostring(v), "good")
+    end)
+    sVis:Slider("Text Scale", math.floor((UI.textScale or 1) * 100 + 0.5), 80, 160, "%", function(v)
+        if UI.SetTextScale then UI:SetTextScale(v / 100) end
+    end)
+    sVis:Button("Auto Scale (monitor)", function()
+        local sc = UI.AutoScaleFromViewport and UI:AutoScaleFromViewport() or 1
+        notify("UI", string.format("scale %.0f%%", sc * 100), "good")
     end)
 
     local s2 = tab:Section("Session")

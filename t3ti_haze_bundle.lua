@@ -35,6 +35,7 @@ local S = {
     dimAnim = 0,
     uiText = true,
     textScale = 1,
+    fontName = "UI",
     showCursor = true,
     rainbow = false,
     rainbowSpeed = 40,
@@ -303,11 +304,24 @@ local T = {
     valueBox = Color3.fromRGB(27, 26, 31),
     good = Color3.fromRGB(120, 210, 145),
     bad = Color3.fromRGB(240, 100, 105),
-    rowH = 33,
-    pad = 17,
+    rowH = 36,
+    pad = 18,
     corner = 8,
 }
 S.Theme = T
+S._baseProp = { rowH = 36, pad = 18 }
+
+S.FONT_NAMES = { "UI", "System", "Plex", "Monospace" }
+do
+    local F = Drawing.Fonts
+    S.FONTS = {
+        UI = (F and (F.UI or F.System or F.Monospace)) or nil,
+        System = (F and (F.System or F.UI or F.Monospace)) or nil,
+        Plex = (F and (F.Plex or F.UI or F.Monospace)) or nil,
+        Monospace = (F and (F.Monospace or F.UI or F.System)) or nil,
+    }
+    S.font = S.FONTS.UI
+end
 
 local COLOR_PALETTE = {
     Blue = Color3.fromRGB(80, 220, 255),
@@ -358,11 +372,14 @@ local function mkText(str, size, col, center)
     d.Text = str or ""
     d.Color = col or T.text
     d.Center = center and true or false
-    d.Outline = false
-    prop(d, "Font", S.font or Drawing.Fonts.Monospace)
-    prop(d, "Size", S.uiText and math.max(6, math.floor(base * S.textScale + 0.5)) or base)
+    -- Outline = sharp readable text on busy game backgrounds (was false â†’ looked blurry)
+    d.Outline = true
+    prop(d, "OutlineColor", Color3.fromRGB(0, 0, 0))
+    prop(d, "Font", S.font or Drawing.Fonts.UI or Drawing.Fonts.Monospace)
+    local sz = math.max(10, math.floor(base * (S.textScale or 1) + 0.5))
+    prop(d, "Size", sz)
     d.Visible = false
-    allTexts[#allTexts + 1] = { d = d, s = base, ui = S.uiText }
+    allTexts[#allTexts + 1] = { d = d, s = base }
     return d
 end
 
@@ -657,6 +674,7 @@ function S:Window(opts)
     w.chev = mkText(">", 12, T.accent, false)
     w.titleT = mkText(w.title, 12, T.text, false)
     w.closeT = mkText("X", 12, T.textDim, true)
+    w._baseW = w.w
     S.windows[#S.windows + 1] = w
     return w
 end
@@ -671,7 +689,7 @@ function Window:Tab(name)
     function t:Section(title)
         local s = {}
         s.accent = mkSquare(true, T.accent, 1, 1)
-        s.titleT = mkText(string.upper(title), 9, T.section, false)
+        s.titleT = mkText(string.upper(title), 11, T.section, false)
         t.widgets[#t.widgets + 1] = { kind = "section", s = s }
 
         function s:Toggle(label, default, cb)
@@ -1662,6 +1680,48 @@ function S:ApplyAccentHSV()
     self:SetAccentColor(Color3.fromHSV(self.accH / 360, self.accS / 100, self.accV / 100))
 end
 
+function S:RefreshText()
+    local sc = self.textScale or 1
+    local font = self.font or (Drawing.Fonts and (Drawing.Fonts.UI or Drawing.Fonts.Monospace))
+    for _, e in ipairs(allTexts) do
+        if e.d then
+            prop(e.d, "Font", font)
+            prop(e.d, "Size", math.max(10, math.floor((e.s or 13) * sc + 0.5)))
+            prop(e.d, "Outline", true)
+            prop(e.d, "OutlineColor", Color3.fromRGB(0, 0, 0))
+        end
+    end
+end
+
+function S:SetFont(name)
+    name = tostring(name or "UI")
+    if not (self.FONTS and self.FONTS[name]) then name = "UI" end
+    self.fontName = name
+    self.font = self.FONTS[name]
+    self:RefreshText()
+end
+
+function S:SetTextScale(scale)
+    scale = math.clamp(tonumber(scale) or 1, 0.75, 1.75)
+    self.textScale = scale
+    local b = self._baseProp or { rowH = 36, pad = 18 }
+    T.rowH = math.floor(b.rowH * scale + 0.5)
+    T.pad = math.floor(b.pad * scale + 0.5)
+    self:RefreshText()
+    for _, w in ipairs(self.windows) do
+        local baseW = w._baseW or w.w
+        w._baseW = baseW
+        w.w = math.floor(baseW * math.max(1, scale) + 0.5)
+    end
+end
+
+function S:AutoScaleFromViewport()
+    local _, vy = viewport()
+    local scale = math.clamp((vy or 1080) / 1080, 0.9, 1.55)
+    self:SetTextScale(scale)
+    return scale
+end
+
 --------------------------------------------------------------------
 -- Search typing
 --------------------------------------------------------------------
@@ -2155,6 +2215,7 @@ UI.showCursor = true
 UI.hideSystemCursor = true
 UI.watermark = game.Players.LocalPlayer.Name
 UI.showWatermark = true
+pcall(function() UI:SetFont("UI") end)
 
 --------------------------------------------------------------------
 -- Services / refs
@@ -2894,7 +2955,8 @@ end
 --------------------------------------------------------------------
 -- UI
 --------------------------------------------------------------------
-local win = UI:Window({ title = "Haze Seas", x = 80, y = 60, w = 310, visible = false })
+local win = UI:Window({ title = "Haze Seas", x = 80, y = 60, w = 360, visible = false })
+pcall(function() UI:AutoScaleFromViewport() end)
 
 -- Quests
 do
@@ -3134,6 +3196,19 @@ do
     end)
     s1:Toggle("UI Sounds", true, function(v)
         UI.soundsEnabled = v
+    end)
+
+    local sVis = tab:Section("Readability")
+    sVis:Dropdown("Font", UI.FONT_NAMES or { "UI", "System", "Plex", "Monospace" }, UI.fontName or "UI", function(v)
+        if UI.SetFont then UI:SetFont(v) end
+        notify("UI", "font Â· " .. tostring(v), "good")
+    end)
+    sVis:Slider("Text Scale", math.floor((UI.textScale or 1) * 100 + 0.5), 80, 160, "%", function(v)
+        if UI.SetTextScale then UI:SetTextScale(v / 100) end
+    end)
+    sVis:Button("Auto Scale (monitor)", function()
+        local sc = UI.AutoScaleFromViewport and UI:AutoScaleFromViewport() or 1
+        notify("UI", string.format("scale %.0f%%", sc * 100), "good")
     end)
 
     local s2 = tab:Section("Session")
