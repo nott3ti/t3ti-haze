@@ -404,7 +404,28 @@ local function npcNameMatches(instName, keys)
     return false
 end
 
--- Nearest live NPC for current/given quest kill target; falls back to spawn-pad center
+-- Collect ObservationHaki pads for any alias key
+local function allQuestPads(keys)
+    local pads = {}
+    local seen = {}
+    for _, k in ipairs(keys) do
+        for _, p in ipairs(findQuestSpawnPads(k)) do
+            local id = p.part
+            if not seen[id] then
+                seen[id] = true
+                pads[#pads + 1] = p
+            end
+        end
+    end
+    return pads
+end
+
+--[[
+  Pick stand for current kill quest.
+  Prefer nearest LIVE npc (Holy quest often has Divine Soldier models nearby).
+  Pad fallback uses NEAREST pad to you across aliases — never average / never
+  the far upper Holy pads when Divine pads are next to you (that rubberbands).
+]]
 local function questKillStand(targetName)
     targetName = targetName or currentQuestTarget()
     if not targetName then return nil, "no active kill quest" end
@@ -412,114 +433,143 @@ local function questKillStand(targetName)
     local keys = questTargetKeys(targetName)
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
     local from = hrp and hrp.Position
-    local nearest, nearestDist, count = nil, math.huge, 0
+    if not from then return nil, "no character" end
 
-    local function consider(m)
+    local nearest, nearestDist, count, hitName = nil, math.huge, 0, nil
+
+    local function considerModel(m)
         if not m:IsA("Model") then return end
         if not npcNameMatches(m.Name, keys) then return end
-        -- skip dead / no HRP-ish models when possible
         local hum = m:FindFirstChildOfClass("Humanoid")
         if hum and hum.Health <= 0 then return end
         local ok, piv = pcall(function() return m:GetPivot().Position end)
         if not ok or not piv then return end
         count += 1
-        if from then
-            local d = (piv - from).Magnitude
-            if d < nearestDist then
-                nearestDist = d
-                nearest = piv
-            end
-        elseif not nearest then
+        local d = (piv - from).Magnitude
+        if d < nearestDist then
+            nearestDist = d
             nearest = piv
+            hitName = m.Name
         end
     end
 
     local zones = workspace:FindFirstChild("NPC Zones")
     if zones then
         for _, zone in ipairs(zones:GetChildren()) do
-            local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs") or zone
-            for _, m in ipairs(npcs:GetChildren()) do
-                consider(m)
+            local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs")
+            if npcs then
+                for _, m in ipairs(npcs:GetChildren()) do
+                    considerModel(m)
+                end
             end
-        end
-    end
-    if count == 0 then
-        for _, d in ipairs(workspace:GetDescendants()) do
-            consider(d)
-            if count >= 60 then break end
         end
     end
 
     if nearest then
-        return nearest + Vector3.new(0, 4, 0), count, targetName, "npc"
+        -- stand a bit above / offset so we don't clip into the NPC
+        local stand = nearest + Vector3.new(0, 5, 0)
+        return stand, count, targetName, "npc:" .. tostring(hitName), nearestDist
     end
 
-    -- fallback: ObservationHaki spawn pads for that mob
-    local pads = findQuestSpawnPads(targetName)
-    -- also try aliases for pad names
-    if #pads == 0 then
-        for _, k in ipairs(keys) do
-            pads = findQuestSpawnPads(k)
-            if #pads > 0 then break end
+    local pads = allQuestPads(keys)
+    local bestPad, bestPadDist = nil, math.huge
+    for _, p in ipairs(pads) do
+        local d = (p.pos - from).Magnitude
+        if d < bestPadDist then
+            bestPadDist = d
+            bestPad = p
         end
     end
-    local pad = padCenter(pads)
-    if pad then
-        return pad + Vector3.new(0, 6, 0), #pads, targetName, "pad"
+    if bestPad then
+        return bestPad.pos + Vector3.new(0, 6, 0), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
     end
 
     return nil, "no NPCs/pads for " .. targetName
 end
 
--- Slow CFrame tween to whatever the quest says to kill (~35 studs/s)
-local _questTween
+-- Game-style flight: BodyVelocity (same pattern as Haki clash) — no Anchor (server rubberbands that)
+local _questFlyToken = 0
 local function slowTweenToQuestTarget()
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp then return false, "no character" end
 
-    local stand, countOrErr, targetName, kind = questKillStand()
+    local stand, countOrErr, targetName, kind, dist0 = questKillStand()
     if not stand then return false, countOrErr end
 
-    if _questTween then
-        pcall(function() _questTween:Cancel() end)
-        _questTween = nil
+    _questFlyToken += 1
+    local token = _questFlyToken
+
+    -- clean previous fly movers
+    for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro" }) do
+        local old = hrp:FindFirstChild(n)
+        if old then pcall(function() old:Destroy() end) end
     end
 
-    local look = stand - Vector3.new(0, 4, 0)
-    local dist = (stand - hrp.Position).Magnitude
-    local duration = math.clamp(dist / 35, 4, 25)
-    local goal = CFrame.lookAt(stand, Vector3.new(look.X, stand.Y, look.Z))
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = "T3tiQuestFly"
+    bv.MaxForce = Vector3.new(1, 1, 1) * math.huge
+    bv.P = 1250
+    bv.Velocity = Vector3.zero
+    bv.Parent = hrp
+
+    local bg = Instance.new("BodyGyro")
+    bg.Name = "T3tiQuestGyro"
+    bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+    bg.P = 3000
+    bg.D = 500
+    bg.CFrame = hrp.CFrame
+    bg.Parent = hrp
+
+    local speed = 40 -- studs/s, slow
+    local arrive = 10
+    local t0 = tick()
+    local maxT = math.clamp((dist0 or 200) / speed + 5, 8, 40)
+    local okArrive = false
+
+    while token == _questFlyToken and hrp.Parent and (tick() - t0) < maxT do
+        if not UI.alive then break end
+        local pos = hrp.Position
+        local delta = stand - pos
+        local dist = delta.Magnitude
+        if dist <= arrive then
+            okArrive = true
+            break
+        end
+        local dir = delta.Unit
+        -- ease down near target
+        local v = speed
+        if dist < 40 then
+            v = math.max(12, speed * (dist / 40))
+        end
+        bv.Velocity = dir * v
+        bg.CFrame = CFrame.lookAt(pos, Vector3.new(stand.X, pos.Y, stand.Z))
+        RunService.Heartbeat:Wait()
+    end
 
     pcall(function()
-        if hum then hum.PlatformStand = true end
-        hrp.Anchored = true
+        bv:Destroy()
+        bg:Destroy()
     end)
+    if hum then
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+    end
 
-    local tw = TweenService:Create(
-        hrp,
-        TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
-        { CFrame = goal }
-    )
-    _questTween = tw
-    tw:Play()
-    tw.Completed:Wait()
-    _questTween = nil
+    if token ~= _questFlyToken then
+        return false, "cancelled"
+    end
+    if not okArrive then
+        return false, "timeout · " .. tostring(kind)
+    end
 
-    pcall(function()
-        hrp.Anchored = false
-        if hum then hum.PlatformStand = false end
-        hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
-    end)
-
+    local elapsed = tick() - t0
     return true, string.format(
-        "%s · %.0fs · %s×%s · %.0f studs",
+        "%s · %.1fs · %s · %.0f studs",
         tostring(targetName),
-        duration,
-        tostring(countOrErr),
+        elapsed,
         tostring(kind),
-        dist
+        dist0 or 0
     )
 end
 
@@ -532,8 +582,18 @@ local function seaRiftPadClear()
     local target = currentQuestTarget()
     if not target then return false, "no active kill quest" end
 
-    local pads = findQuestSpawnPads(target)
-    local pad = padCenter(pads)
+    local keys = questTargetKeys(target)
+    local pads = allQuestPads(keys)
+    local from = hrp.Position
+    local best, bestD = nil, math.huge
+    for _, p in ipairs(pads) do
+        local d = (p.pos - from).Magnitude
+        if d < bestD then
+            bestD = d
+            best = p
+        end
+    end
+    local pad = best and best.pos
     if not pad then return false, "no spawn pad for " .. target end
 
     local stand = safeStandForPad(pad, target)
@@ -660,10 +720,10 @@ do
     end)
 
     local s2 = tab:Section("Tween")
-    s2:Label("Slow fly to current quest kill target")
+    s2:Label("BodyVelocity fly → nearest quest NPC")
     s2:Button("Slow Tween → Quest Target", function()
         local t = currentQuestTarget()
-        notify("Travel", t and ("tween → " .. t) or "no kill quest", t and "good" or "bad")
+        notify("Travel", t and ("fly → " .. t) or "no kill quest", t and "good" or "bad")
         if not t then return end
         task.spawn(function()
             local ok, info = slowTweenToQuestTarget()
