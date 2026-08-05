@@ -487,12 +487,12 @@ local function questKillStand(targetName)
     return nil, "no NPCs/pads for " .. targetName
 end
 
--- Game-style flight: BodyVelocity (same pattern as Haki clash) — no Anchor (server rubberbands that)
+-- Heartbeat CFrame fly — BodyVelocity is ignored by this game; small CFrame
+-- steps stick (tested). No Anchor (that rubberbands).
 local _questFlyToken = 0
 local function slowTweenToQuestTarget()
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp then return false, "no character" end
 
     local stand, countOrErr, targetName, kind, dist0 = questKillStand()
@@ -501,35 +501,19 @@ local function slowTweenToQuestTarget()
     _questFlyToken += 1
     local token = _questFlyToken
 
-    -- clean previous fly movers
+    -- remove leftover movers from older builds
     for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro" }) do
         local old = hrp:FindFirstChild(n)
         if old then pcall(function() old:Destroy() end) end
     end
 
-    local bv = Instance.new("BodyVelocity")
-    bv.Name = "T3tiQuestFly"
-    bv.MaxForce = Vector3.new(1, 1, 1) * math.huge
-    bv.P = 1250
-    bv.Velocity = Vector3.zero
-    bv.Parent = hrp
-
-    local bg = Instance.new("BodyGyro")
-    bg.Name = "T3tiQuestGyro"
-    bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-    bg.P = 3000
-    bg.D = 500
-    bg.CFrame = hrp.CFrame
-    bg.Parent = hrp
-
-    local speed = 40 -- studs/s, slow
-    local arrive = 10
+    local speed = 45 -- studs/s
+    local arrive = 12
     local t0 = tick()
-    local maxT = math.clamp((dist0 or 200) / speed + 5, 8, 40)
+    local maxT = math.clamp((dist0 or 200) / speed + 8, 10, 45)
     local okArrive = false
 
-    while token == _questFlyToken and hrp.Parent and (tick() - t0) < maxT do
-        if not UI.alive then break end
+    while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
         local pos = hrp.Position
         local delta = stand - pos
         local dist = delta.Magnitude
@@ -537,23 +521,11 @@ local function slowTweenToQuestTarget()
             okArrive = true
             break
         end
-        local dir = delta.Unit
-        -- ease down near target
-        local v = speed
-        if dist < 40 then
-            v = math.max(12, speed * (dist / 40))
-        end
-        bv.Velocity = dir * v
-        bg.CFrame = CFrame.lookAt(pos, Vector3.new(stand.X, pos.Y, stand.Z))
-        RunService.Heartbeat:Wait()
-    end
-
-    pcall(function()
-        bv:Destroy()
-        bg:Destroy()
-    end)
-    if hum then
-        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        local dt = RunService.Heartbeat:Wait()
+        if token ~= _questFlyToken or not hrp.Parent then break end
+        local step = math.min(speed * math.max(dt, 1 / 120), dist)
+        local nxt = pos + delta.Unit * step
+        hrp.CFrame = CFrame.lookAt(nxt, Vector3.new(stand.X, nxt.Y, stand.Z))
     end
 
     if token ~= _questFlyToken then
@@ -563,11 +535,10 @@ local function slowTweenToQuestTarget()
         return false, "timeout · " .. tostring(kind)
     end
 
-    local elapsed = tick() - t0
     return true, string.format(
         "%s · %.1fs · %s · %.0f studs",
         tostring(targetName),
-        elapsed,
+        tick() - t0,
         tostring(kind),
         dist0 or 0
     )
@@ -720,7 +691,7 @@ do
     end)
 
     local s2 = tab:Section("Tween")
-    s2:Label("BodyVelocity fly → nearest quest NPC")
+    s2:Label("CFrame fly → nearest quest NPC")
     s2:Button("Slow Tween → Quest Target", function()
         local t = currentQuestTarget()
         notify("Travel", t and ("fly → " .. t) or "no kill quest", t and "good" or "bad")
