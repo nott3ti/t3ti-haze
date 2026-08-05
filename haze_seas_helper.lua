@@ -90,7 +90,7 @@ local function pressAbilityKey(keyCode)
     if not keyCode then return false end
     local ok = pcall(function()
         VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
-        task.wait(0.04)
+        task.wait(0.05)
         VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
     end)
     return ok
@@ -104,6 +104,21 @@ local function charHakiFlags(char)
         obs = char:FindFirstChild("ObservationHaki"),
         haki = char:FindFirstChild("Haki"),
     }
+end
+
+-- Settings can lie (HakiObs stored as K while game uses R). Try several keys until flag is ON.
+local function pressUntilFlag(getFlag, keyCodes)
+    for _, kc in ipairs(keyCodes) do
+        if kc then
+            pressAbilityKey(kc)
+            task.wait(0.2)
+            local flags = charHakiFlags()
+            if flags and getFlag(flags) == true then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 local State = {
@@ -134,7 +149,7 @@ local State = {
     farmHeight = 1.5,
     skillEnabled = {},
     m1Tool = "Auto",
-    -- Auto Haki / Buso (keybinds from Settings; default J buso / K obs)
+    -- Auto Haki / Buso (Obs is R in-game; settings may still say K)
     autoBuso = true,
     autoHaki = true, -- Observation Haki
     lastHakiToggle = 0,
@@ -171,7 +186,7 @@ end
 -- MUST be after State (Luau treats earlier refs as a different nil global)
 local function ensureAutoHaki(force)
     if not (State.autoBuso or State.autoHaki) then return false end
-    if not force and tick() - (State.lastHakiToggle or 0) < 0.35 then
+    if not force and tick() - (State.lastHakiToggle or 0) < 0.45 then
         return false
     end
     local flags = charHakiFlags()
@@ -181,15 +196,25 @@ local function ensureAutoHaki(force)
     -- Buso (Armament) — keep ON
     if State.autoBuso and flags.buso and flags.buso.Value ~= true then
         State.lastHakiToggle = tick()
-        pressAbilityKey(readAbilityKey("HakiBuso", "J"))
+        pressUntilFlag(function(f)
+            return f.buso and f.buso.Value
+        end, {
+            readAbilityKey("HakiBuso", "J"),
+            Enum.KeyCode.J,
+        })
         pressed = true
-        task.wait(0.12)
         flags = charHakiFlags() or flags
     end
-    -- Observation Haki — keep ON
+    -- Observation Haki — keep ON (in-game bind is R; settings often still say K)
     if State.autoHaki and flags.obs and flags.obs.Value ~= true then
         State.lastHakiToggle = tick()
-        pressAbilityKey(readAbilityKey("HakiObs", "K"))
+        pressUntilFlag(function(f)
+            return f.obs and f.obs.Value
+        end, {
+            Enum.KeyCode.R, -- actual bind
+            readAbilityKey("HakiObs", "R"),
+            Enum.KeyCode.K, -- legacy settings default
+        })
         pressed = true
     end
     return pressed
@@ -1677,7 +1702,7 @@ do
         end
         notify("Haki", v and "Buso auto ON" or "Buso auto OFF", v and "good" or "bad")
     end)
-    s1:Toggle("Auto Haki / Obs (K)", State.autoHaki, function(v)
+    s1:Toggle("Auto Obs Haki (R)", State.autoHaki, function(v)
         State.autoHaki = v
         savePersist()
         if v then
@@ -1685,7 +1710,7 @@ do
                 ensureAutoHaki(true)
             end)
         end
-        notify("Haki", v and "Obs Haki auto ON" or "Obs Haki auto OFF", v and "good" or "bad")
+        notify("Haki", v and "Obs Haki auto ON (R)" or "Obs Haki auto OFF", v and "good" or "bad")
     end)
 end
 
