@@ -2487,6 +2487,96 @@ local function safeStandForPad(pad, targetName)
     return pad + Vector3.new(-220, 150, 80)
 end
 
+-- Find Holy / Divine Soldier cluster (Sky Islands)
+local function holySoldierCenter()
+    local sum, n = Vector3.zero, 0
+    local nearest, nearestDist = nil, math.huge
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    local from = hrp and hrp.Position
+
+    local function consider(m)
+        if not m:IsA("Model") then return end
+        local nlow = m.Name:lower()
+        if not (nlow:find("holy") or nlow:find("divine")) then return end
+        if not (nlow:find("soldier")) then return end
+        local ok, piv = pcall(function() return m:GetPivot().Position end)
+        if not ok or not piv then return end
+        sum = sum + piv
+        n = n + 1
+        if from then
+            local d = (piv - from).Magnitude
+            if d < nearestDist then
+                nearestDist = d
+                nearest = piv
+            end
+        end
+    end
+
+    local zones = workspace:FindFirstChild("NPC Zones")
+    local sky = zones and zones:FindFirstChild("Sky Islands")
+    local npcs = sky and sky:FindFirstChild("NPCS")
+    if npcs then
+        for _, m in ipairs(npcs:GetChildren()) do
+            consider(m)
+        end
+    end
+    if n == 0 then
+        for _, d in ipairs(workspace:GetDescendants()) do
+            consider(d)
+            if n >= 40 then break end
+        end
+    end
+    if n == 0 then return nil, "no Holy/Divine Soldiers found" end
+    -- prefer nearest NPC; else cluster center
+    local target = nearest or (sum / n)
+    return target + Vector3.new(0, 4, 0), n
+end
+
+-- Slow CFrame tween toward Holy Soldiers (~35 studs/s, min 4s max 25s)
+local _holyTween
+local function slowTweenToHolySoldiers()
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp then return false, "no character" end
+
+    local stand, countOrErr = holySoldierCenter()
+    if not stand then return false, countOrErr end
+
+    if _holyTween then
+        pcall(function() _holyTween:Cancel() end)
+        _holyTween = nil
+    end
+
+    local dist = (stand - hrp.Position).Magnitude
+    local duration = math.clamp(dist / 35, 4, 25)
+    local look = stand - Vector3.new(0, 4, 0)
+    local goal = CFrame.lookAt(stand, Vector3.new(look.X, stand.Y, look.Z))
+
+    pcall(function()
+        if hum then hum.PlatformStand = true end
+        hrp.Anchored = true
+    end)
+
+    local tw = TweenService:Create(
+        hrp,
+        TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+        { CFrame = goal }
+    )
+    _holyTween = tw
+    tw:Play()
+    tw.Completed:Wait()
+    _holyTween = nil
+
+    pcall(function()
+        hrp.Anchored = false
+        if hum then hum.PlatformStand = false end
+        hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
+    end)
+
+    return true, string.format("%.0fs Â· %s npcs Â· %.0f studs", duration, tostring(countOrErr), dist)
+end
+
 -- Tween to safe perch, aim mouse at pad center, cast Sea Rift
 local function seaRiftPadClear()
     local char = LP.Character
@@ -2621,6 +2711,16 @@ do
     s1:Button("Teleport Home Only", function()
         local ok, err = teleportHomeOnly()
         notify("Travel", ok and "home" or tostring(err), ok and "good" or "bad")
+    end)
+
+    local s2 = tab:Section("Tween")
+    s2:Label("Slow fly to Holy/Divine Soldiers")
+    s2:Button("Slow Tween â†’ Holy Soldiers", function()
+        notify("Travel", "tweening...", "good")
+        task.spawn(function()
+            local ok, info = slowTweenToHolySoldiers()
+            notify("Travel", ok and ("arrived Â· " .. tostring(info)) or tostring(info), ok and "good" or "bad")
+        end)
     end)
 end
 
