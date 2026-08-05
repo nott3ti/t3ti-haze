@@ -3014,8 +3014,8 @@ local function questKillStand(targetName)
         end
     end
     if bestPad then
-        -- Stable wait perch: slightly above pad, fixed offset (no moving goal)
-        return bestPad.pos + Vector3.new(8, 6, 8), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
+        -- Wait perch at pad height (same Y band as combat) — +6 caused post-kill bob
+        return bestPad.pos + Vector3.new(6, 2, 6), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
     end
 
     return nil, "no NPCs/pads for " .. targetName
@@ -4129,6 +4129,8 @@ end
 -- Locked side vector so the stand doesn't orbit as you / NPC micro-move
 local _farmLockNpc = nil
 local _farmLockSide = nil -- Unit Vector3 XZ
+local _lastCombatStand = nil -- stay here after a kill instead of pad-yo-yo
+local _lastCombatAt = 0
 
 local function clearFarmLock()
     _farmLockNpc = nil
@@ -4191,22 +4193,28 @@ task.spawn(function()
                     local npc, pos, dist = resolveFarmTarget(targetName, hrp)
                     if npc and pos then
                         local stand = farmStandPos(pos, npc, hrp.Position)
+                        _lastCombatStand = stand
+                        _lastCombatAt = tick()
                         local melee = State.farmMelee or 6
                         local fdist = flatDist(hrp.Position, pos)
                         local dy = hrp.Position.Y - pos.Y
                         local standDist = (hrp.Position - stand).Magnitude
 
-                        local needFly = _forceFarmRepath
-                            or standDist > 16
-                            or fdist > (melee + 8)
-                            or math.abs(dy) > 12
-                        if needFly and tick() - lastFly > 0.8 then
+                        -- Near the fight: ONLY soft hold — full bvFlyTo causes kill→spawn bounce
+                        local closeFight = (dist or 99) < 55 and math.abs(dy) < 22
+                        local needFly = (not closeFight) and (
+                            _forceFarmRepath
+                            or standDist > 22
+                            or fdist > (melee + 12)
+                            or math.abs(dy) > 16
+                        )
+                        if needFly and tick() - lastFly > 1.0 then
                             lastFly = tick()
                             _forceFarmRepath = false
                             State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
                             local ok, _, cache = bvFlyTo(stand, {
-                                speed = 700,
-                                arrive = math.max(3.5, melee * 0.45),
+                                speed = 650,
+                                arrive = math.max(4, melee * 0.5),
                                 keepNoclip = true,
                                 cancel = function()
                                     return not State.autoFarm or not UI.alive
@@ -4219,6 +4227,8 @@ task.spawn(function()
                             npc, pos, dist = resolveFarmTarget(targetName, hrp)
                             if npc and pos then
                                 stand = farmStandPos(pos, npc, hrp.Position)
+                                _lastCombatStand = stand
+                                _lastCombatAt = tick()
                                 farmHoldAt(stand, pos)
                                 fdist = flatDist(hrp.Position, pos)
 
@@ -4259,42 +4269,54 @@ task.spawn(function()
                         end
                     else
                         clearFarmLock()
-                        -- No live NPC: fly to Observation pad / hold. Never block on TeleportToHome.
+                        -- Boss dead / waiting respawn: HOLD last fight spot — do NOT
+                        -- repath to pad (pad Y offset caused the up/down bounce).
                         clearVirtualAim()
                         local waitStand, err, _, kind, dist0 = questKillStand(targetName)
-                        if waitStand then
-                            local wf = flatDist(hrp.Position, waitStand)
-                            local dy = hrp.Position.Y - waitStand.Y
-                            if _forceFarmRepath or wf > 16 or math.abs(dy) > 20 then
-                                if tick() - lastFly > 0.9 then
-                                    lastFly = tick()
-                                    _forceFarmRepath = false
-                                    State.status = string.format(
-                                        "goto · %s · %.0fd",
-                                        tostring(kind or "pad"),
-                                        dist0 or 0
-                                    )
-                                    local ok, _, cache = bvFlyTo(waitStand, {
-                                        speed = 700,
-                                        arrive = 12,
-                                        keepNoclip = true,
-                                        cancel = function()
-                                            return not State.autoFarm or not UI.alive
-                                        end,
-                                    })
-                                    if cache then _farmNoclipCache = cache end
-                                    if not ok then
-                                        State.status = "travel fail · " .. tostring(targetName)
-                                    end
-                                else
-                                    State.status = "seek · " .. tostring(targetName)
+                        local perch, perchKind = waitStand, kind
+                        if _lastCombatStand and (tick() - _lastCombatAt) < 60 then
+                            -- same arena: freeze where you killed
+                            if (not waitStand)
+                                or flatDist(_lastCombatStand, waitStand) < 55
+                                or math.abs(_lastCombatStand.Y - (waitStand and waitStand.Y or _lastCombatStand.Y)) < 35
+                            then
+                                perch = _lastCombatStand
+                                perchKind = "last"
+                            end
+                        end
+                        if perch then
+                            local wf = flatDist(hrp.Position, perch)
+                            local dy = hrp.Position.Y - perch.Y
+                            -- Only long-range travel uses bvFlyTo; nearby = hold still
+                            local far = wf > 40 or math.abs(dy) > 35
+                            if far and (_forceFarmRepath or tick() - lastFly > 1.2) then
+                                lastFly = tick()
+                                _forceFarmRepath = false
+                                State.status = string.format(
+                                    "goto · %s · %.0fd",
+                                    tostring(perchKind or "pad"),
+                                    dist0 or wf
+                                )
+                                local ok, _, cache = bvFlyTo(perch, {
+                                    speed = 650,
+                                    arrive = 14,
+                                    keepNoclip = true,
+                                    cancel = function()
+                                        return not State.autoFarm or not UI.alive
+                                    end,
+                                })
+                                if cache then _farmNoclipCache = cache end
+                                if not ok then
+                                    State.status = "travel fail · " .. tostring(targetName)
                                 end
                             else
-                                farmHoldAt(waitStand, waitStand)
+                                -- cancel any leftover travel so we don't bob
+                                _questFlyToken += 1
+                                farmHoldAt(perch, perch)
                                 State.status = string.format(
                                     "wait · %s · %s",
                                     tostring(targetName),
-                                    tostring(kind or "pad")
+                                    tostring(perchKind or "pad")
                                 )
                             end
                         else
