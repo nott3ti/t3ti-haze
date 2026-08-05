@@ -2767,9 +2767,10 @@ local function bountyValue()
     return b and b.Value or 0
 end
 
-local questPanel = UI:Panel({ title = "T3ti Quest", x = 20, y = 70, w = 260, visible = false })
-local playerPanel = UI:Panel({ title = "T3ti Player", x = 20, y = 320, w = 260, visible = false })
-local statsPanel = UI:Panel({ title = "T3ti Stats", x = 20, y = 560, w = 260, visible = false })
+local userName = LP.Name
+local questPanel = UI:Panel({ title = "(" .. userName .. ") Quest", x = 20, y = 70, w = 260, visible = false })
+local playerPanel = UI:Panel({ title = "(" .. userName .. ") Player", x = 20, y = 320, w = 260, visible = false })
+local statsPanel = UI:Panel({ title = "(" .. userName .. ") Stats", x = 20, y = 560, w = 260, visible = false })
 
 function refreshPanel()
     local lvl = LevelVal.Value
@@ -2791,7 +2792,6 @@ function refreshPanel()
     State.bestLabel = bestLabel
 
     questPanel:Set({
-        { left = "UI", right = "T3ti Haze", color = UI.Theme.accent },
         { left = "Level", right = tostring(lvl), color = UI.Theme.text },
         { left = "Best Quest", right = best and best.key or "-", color = UI.Theme.good },
         { left = "NPC", right = best and best.display or "-", color = UI.Theme.label },
@@ -2802,12 +2802,10 @@ function refreshPanel()
           color = State.autoAccept and UI.Theme.good or UI.Theme.bad },
         { left = "Status", right = tostring(State.status):sub(1, 20), color = UI.Theme.accent },
     })
-    questPanel.title = "T3ti Quest [Lv" .. lvl .. "] Â· " .. (best and best.key or "none")
+    questPanel.title = "(" .. userName .. ") Quest"
     if questPanel.titleT then questPanel.titleT.Text = questPanel.title end
 
-    local userName = LP.Name
     playerPanel:Set({
-        { left = "User", right = userName, color = UI.Theme.accent },
         { left = "Level", right = tostring(lvl), color = UI.Theme.text },
         { left = "EXP", right = fmtNum(xp), color = UI.Theme.label },
         { left = "Cash", right = fmtNum(cash), color = UI.Theme.good },
@@ -2819,7 +2817,7 @@ function refreshPanel()
         { left = "Style", right = tostring(style), color = UI.Theme.label },
         { left = "Race", right = tostring(race), color = UI.Theme.label },
     })
-    playerPanel.title = "T3ti Player Â· " .. userName
+    playerPanel.title = "(" .. userName .. ") Player"
     if playerPanel.titleT then playerPanel.titleT.Text = playerPanel.title end
 
     statsPanel:Set({
@@ -2830,7 +2828,7 @@ function refreshPanel()
         { left = "Sword", right = tostring(swordStat), color = UI.Theme.label },
         { left = "Refund", right = tostring(val(PD:FindFirstChild("RefundPoints"), 0)), color = UI.Theme.textDim },
     })
-    statsPanel.title = "T3ti Stats [" .. tostring(points) .. " free]"
+    statsPanel.title = "(" .. userName .. ") Stats"
     if statsPanel.titleT then statsPanel.titleT.Text = statsPanel.title end
 end
 
