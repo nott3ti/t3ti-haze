@@ -2487,70 +2487,115 @@ local function safeStandForPad(pad, targetName)
     return pad + Vector3.new(-220, 150, 80)
 end
 
--- Find Holy / Divine Soldier cluster (Sky Islands)
-local function holySoldierCenter()
-    local sum, n = Vector3.zero, 0
-    local nearest, nearestDist = nil, math.huge
+-- Name aliases when quest text â‰  live NPC name (e.g. Holy vs Divine)
+local QUEST_NPC_ALIASES = {
+    ["holy soldier"] = { "holy soldier", "divine soldier" },
+    ["divine soldier"] = { "holy soldier", "divine soldier" },
+}
+
+local function questTargetKeys(targetName)
+    local key = tostring(targetName or ""):lower():gsub("%s+$", "")
+    if key == "" then return {} end
+    return QUEST_NPC_ALIASES[key] or { key }
+end
+
+local function npcNameMatches(instName, keys)
+    local n = tostring(instName or ""):lower()
+    n = n:gsub("%d+$", ""):gsub("%s+$", "")
+    for _, k in ipairs(keys) do
+        if n == k or n:find(k, 1, true) or k:find(n, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Nearest live NPC for current/given quest kill target; falls back to spawn-pad center
+local function questKillStand(targetName)
+    targetName = targetName or currentQuestTarget()
+    if not targetName then return nil, "no active kill quest" end
+
+    local keys = questTargetKeys(targetName)
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
     local from = hrp and hrp.Position
+    local nearest, nearestDist, count = nil, math.huge, 0
 
     local function consider(m)
         if not m:IsA("Model") then return end
-        local nlow = m.Name:lower()
-        if not (nlow:find("holy") or nlow:find("divine")) then return end
-        if not (nlow:find("soldier")) then return end
+        if not npcNameMatches(m.Name, keys) then return end
+        -- skip dead / no HRP-ish models when possible
+        local hum = m:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health <= 0 then return end
         local ok, piv = pcall(function() return m:GetPivot().Position end)
         if not ok or not piv then return end
-        sum = sum + piv
-        n = n + 1
+        count += 1
         if from then
             local d = (piv - from).Magnitude
             if d < nearestDist then
                 nearestDist = d
                 nearest = piv
             end
+        elseif not nearest then
+            nearest = piv
         end
     end
 
     local zones = workspace:FindFirstChild("NPC Zones")
-    local sky = zones and zones:FindFirstChild("Sky Islands")
-    local npcs = sky and sky:FindFirstChild("NPCS")
-    if npcs then
-        for _, m in ipairs(npcs:GetChildren()) do
-            consider(m)
+    if zones then
+        for _, zone in ipairs(zones:GetChildren()) do
+            local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs") or zone
+            for _, m in ipairs(npcs:GetChildren()) do
+                consider(m)
+            end
         end
     end
-    if n == 0 then
+    if count == 0 then
         for _, d in ipairs(workspace:GetDescendants()) do
             consider(d)
-            if n >= 40 then break end
+            if count >= 60 then break end
         end
     end
-    if n == 0 then return nil, "no Holy/Divine Soldiers found" end
-    -- prefer nearest NPC; else cluster center
-    local target = nearest or (sum / n)
-    return target + Vector3.new(0, 4, 0), n
+
+    if nearest then
+        return nearest + Vector3.new(0, 4, 0), count, targetName, "npc"
+    end
+
+    -- fallback: ObservationHaki spawn pads for that mob
+    local pads = findQuestSpawnPads(targetName)
+    -- also try aliases for pad names
+    if #pads == 0 then
+        for _, k in ipairs(keys) do
+            pads = findQuestSpawnPads(k)
+            if #pads > 0 then break end
+        end
+    end
+    local pad = padCenter(pads)
+    if pad then
+        return pad + Vector3.new(0, 6, 0), #pads, targetName, "pad"
+    end
+
+    return nil, "no NPCs/pads for " .. targetName
 end
 
--- Slow CFrame tween toward Holy Soldiers (~35 studs/s, min 4s max 25s)
-local _holyTween
-local function slowTweenToHolySoldiers()
+-- Slow CFrame tween to whatever the quest says to kill (~35 studs/s)
+local _questTween
+local function slowTweenToQuestTarget()
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp then return false, "no character" end
 
-    local stand, countOrErr = holySoldierCenter()
+    local stand, countOrErr, targetName, kind = questKillStand()
     if not stand then return false, countOrErr end
 
-    if _holyTween then
-        pcall(function() _holyTween:Cancel() end)
-        _holyTween = nil
+    if _questTween then
+        pcall(function() _questTween:Cancel() end)
+        _questTween = nil
     end
 
+    local look = stand - Vector3.new(0, 4, 0)
     local dist = (stand - hrp.Position).Magnitude
     local duration = math.clamp(dist / 35, 4, 25)
-    local look = stand - Vector3.new(0, 4, 0)
     local goal = CFrame.lookAt(stand, Vector3.new(look.X, stand.Y, look.Z))
 
     pcall(function()
@@ -2563,10 +2608,10 @@ local function slowTweenToHolySoldiers()
         TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
         { CFrame = goal }
     )
-    _holyTween = tw
+    _questTween = tw
     tw:Play()
     tw.Completed:Wait()
-    _holyTween = nil
+    _questTween = nil
 
     pcall(function()
         hrp.Anchored = false
@@ -2574,7 +2619,14 @@ local function slowTweenToHolySoldiers()
         hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
     end)
 
-    return true, string.format("%.0fs Â· %s npcs Â· %.0f studs", duration, tostring(countOrErr), dist)
+    return true, string.format(
+        "%s Â· %.0fs Â· %sÃ—%s Â· %.0f studs",
+        tostring(targetName),
+        duration,
+        tostring(countOrErr),
+        tostring(kind),
+        dist
+    )
 end
 
 -- Tween to safe perch, aim mouse at pad center, cast Sea Rift
@@ -2714,11 +2766,13 @@ do
     end)
 
     local s2 = tab:Section("Tween")
-    s2:Label("Slow fly to Holy/Divine Soldiers")
-    s2:Button("Slow Tween â†’ Holy Soldiers", function()
-        notify("Travel", "tweening...", "good")
+    s2:Label("Slow fly to current quest kill target")
+    s2:Button("Slow Tween â†’ Quest Target", function()
+        local t = currentQuestTarget()
+        notify("Travel", t and ("tween â†’ " .. t) or "no kill quest", t and "good" or "bad")
+        if not t then return end
         task.spawn(function()
-            local ok, info = slowTweenToHolySoldiers()
+            local ok, info = slowTweenToQuestTarget()
             notify("Travel", ok and ("arrived Â· " .. tostring(info)) or tostring(info), ok and "good" or "bad")
         end)
     end)
