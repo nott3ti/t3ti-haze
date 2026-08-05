@@ -2857,7 +2857,8 @@ local function questKillStand(targetName)
         end
     end
     if bestPad then
-        return bestPad.pos + Vector3.new(0, 8, 0), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
+        -- Stable wait perch: slightly above pad, fixed offset (no moving goal)
+        return bestPad.pos + Vector3.new(8, 6, 8), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
     end
 
     return nil, "no NPCs/pads for " .. targetName
@@ -4022,30 +4023,49 @@ task.spawn(function()
                         end
                     end
                 else
-                    stopFarmHold()
+                    -- No live NPC yet: fly to pad once, then HOLD still and wait.
+                    -- Re-flying every tick caused the up/down bob.
                     clearVirtualAim()
-                    if tick() - lastFly > 0.9 then
-                        lastFly = tick()
-                        local stand, err, _, kind, dist0 = questKillStand(targetName)
-                        if stand then
-                            State.status = string.format("goto · %s · %.0fd", tostring(kind or "pad"), dist0 or 0)
-                            local ok, _, cache = bvFlyTo(farmStandPos(stand, targetName), {
-                                speed = 900,
-                                arrive = 10,
-                                keepNoclip = true,
-                                cancel = function()
-                                    return not State.autoFarm or not UI.alive
-                                end,
-                            })
-                            if cache then _farmNoclipCache = cache end
-                            if not ok then
-                                State.status = "travel fail · " .. tostring(targetName)
+                    local waitStand, err, _, kind, dist0 = questKillStand(targetName)
+                    if waitStand then
+                        -- questKillStand already returns a stand — do NOT farmStandPos() it again
+                        -- (that re-offsets from your current pos and moves the goal every pass)
+                        local fdist = flatDist(hrp.Position, waitStand)
+                        local dy = hrp.Position.Y - waitStand.Y
+                        if fdist > 20 or math.abs(dy) > 25 then
+                            if tick() - lastFly > 1.2 then
+                                lastFly = tick()
+                                State.status = string.format(
+                                    "goto · %s · %.0fd",
+                                    tostring(kind or "pad"),
+                                    dist0 or 0
+                                )
+                                local ok, _, cache = bvFlyTo(waitStand, {
+                                    speed = 700,
+                                    arrive = 14,
+                                    keepNoclip = true,
+                                    cancel = function()
+                                        return not State.autoFarm or not UI.alive
+                                    end,
+                                })
+                                if cache then _farmNoclipCache = cache end
+                                if not ok then
+                                    State.status = "travel fail · " .. tostring(targetName)
+                                end
+                            else
+                                State.status = "seek · " .. tostring(targetName)
                             end
                         else
-                            State.status = "no " .. tostring(targetName)
+                            farmHoldAt(waitStand, waitStand)
+                            State.status = string.format(
+                                "wait · %s · %s",
+                                tostring(targetName),
+                                tostring(kind or "pad")
+                            )
                         end
                     else
-                        State.status = "seek · " .. tostring(targetName)
+                        stopFarmHold()
+                        State.status = "no " .. tostring(targetName)
                     end
                 end
             elseif not targetName then
