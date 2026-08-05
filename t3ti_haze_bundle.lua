@@ -2262,15 +2262,15 @@ local State = {
     farmClick = false, -- OS mouse1click â€” NEVER needed; clicks outside Roblox
     farmMode = "Quest Target", -- or "Selected Enemy"
     farmEnemy = "Holy Soldier",
-    farmRange = 14, -- engage / stay near target (M1 needs ~5â€“10 studs)
-    farmMelee = 9, -- only Activate when this close
+    farmRange = 10,
+    farmMelee = 6, -- Activate only when this close (Thunder God needs ~5)
     farmSkillCd = 0.85,
     lastFarmSkill = 0,
     lastFarmClick = 0,
     lastFarmM1 = 0,
-    farmHeight = 3, -- low hover so melee connects (bosses hate high hover)
-    skillEnabled = {}, -- [skillName] = true/false â€” Specify inventory picks
-    m1Tool = "Auto", -- Auto = match equipped fruit name; else Backpack tool name
+    farmHeight = 3,
+    skillEnabled = {},
+    m1Tool = "Auto",
 }
 
 local function notify(t, b, k)
@@ -2635,12 +2635,24 @@ end
 
 -- In-game M1 via fruit/weapon tool Activate â€” no OS click, mouse stays free
 local function doFarmM1()
-    if UI.uiVisible or UI._booting then
+    -- allow during farm even if menu somehow open
+    if UI._booting then
         return false
     end
     local tool = ensureM1ToolEquipped()
     if not tool then
         return false
+    end
+    -- re-equip if game swapped us to Combat mid-fight
+    local char = LP.Character
+    if char and tool.Parent ~= char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function()
+                hum:EquipTool(tool)
+            end)
+            tool = char:FindFirstChild(tool.Name) or tool
+        end
     end
     return (pcall(function()
         tool:Activate()
@@ -2846,6 +2858,7 @@ end
   - BodyVelocity + BodyGyro on HRP (NOT Anchored, NOT CFrame teleport)
 ]]
 local _questFlyToken = 0
+local _farmNoclipCache = nil
 local function setNoclip(char, on, cache)
     cache = cache or {}
     for _, p in ipairs(char:GetDescendants()) do
@@ -2877,7 +2890,7 @@ local function bvFlyTo(goal, opts)
     local arrive = opts.arrive or 12
     local keepNoclip = opts.keepNoclip == true
 
-    for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro" }) do
+    for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro", "T3tiFarmHold", "T3tiFarmGyro" }) do
         local old = hrp:FindFirstChild(n)
         if old then pcall(function() old:Destroy() end) end
     end
@@ -2901,7 +2914,8 @@ local function bvFlyTo(goal, opts)
 
     local dist0 = (goal - hrp.Position).Magnitude
     local t0 = tick()
-    local maxT = math.clamp(dist0 / speed + 4, 3, 25)
+    -- long sky-island hops need more than a few seconds
+    local maxT = math.clamp(dist0 / math.max(200, speed) + 8, 6, 50)
     local okArrive = false
 
     while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
@@ -2939,6 +2953,51 @@ local function bvFlyTo(goal, opts)
         return false, "timeout", collCache
     end
     return settle <= 50, settle <= 50 and "ok" or "rubberband", collCache
+end
+
+-- Keep floating beside the NPC while noclip (otherwise you fall through the island)
+local function farmHoldAt(goal, lookAt)
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp or typeof(goal) ~= "Vector3" then return end
+    if not _farmNoclipCache then
+        _farmNoclipCache = setNoclip(char, true, {})
+    end
+    local bv = hrp:FindFirstChild("T3tiFarmHold")
+    if not bv then
+        bv = Instance.new("BodyVelocity")
+        bv.Name = "T3tiFarmHold"
+        bv.MaxForce = Vector3.new(1, 1, 1) * 2e10
+        bv.P = 25000
+        bv.Parent = hrp
+    end
+    local bg = hrp:FindFirstChild("T3tiFarmGyro")
+    if not bg then
+        bg = Instance.new("BodyGyro")
+        bg.Name = "T3tiFarmGyro"
+        bg.MaxTorque = Vector3.new(1, 1, 1) * 2e10
+        bg.P = 14000
+        bg.D = 400
+        bg.Parent = hrp
+    end
+    local delta = goal - hrp.Position
+    local dist = delta.Magnitude
+    if dist < 2 then
+        bv.Velocity = Vector3.zero
+    else
+        bv.Velocity = delta.Unit * math.clamp(dist * 14, 35, 520)
+    end
+    local look = lookAt or goal
+    bg.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
+end
+
+local function stopFarmHold()
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    for _, n in ipairs({ "T3tiFarmHold", "T3tiFarmGyro" }) do
+        local o = hrp:FindFirstChild(n)
+        if o then pcall(function() o:Destroy() end) end
+    end
 end
 
 local function slowTweenToQuestTarget()
@@ -3178,8 +3237,8 @@ local function castFarmSkills(aimPos, aimTarget)
     end
 end
 
-local _farmNoclipCache = nil
 local function stopFarmNoclip()
+    stopFarmHold()
     local char = LP.Character
     if char and _farmNoclipCache then
         setNoclip(char, false, _farmNoclipCache)
@@ -3717,8 +3776,7 @@ local function farmStandPos(pos, targetName)
     return pos + Vector3.new(0, math.max(0, h), 0)
 end
 
--- Auto Farm: find live NPC â†’ BV into melee â†’ tool Activate + selected skills.
--- If none streamed yet, BV to nearest quest pad / stand so enemies can load in.
+-- Auto Farm: fly in â†’ HOLD beside target (noclip without hold = fall through island) â†’ M1
 task.spawn(function()
     local lastFly = 0
     local lastPanel = 0
@@ -3730,36 +3788,35 @@ task.spawn(function()
                 local npc, pos, dist = findNearestEnemyModel(targetName)
                 if npc and pos then
                     local stand = farmStandPos(pos, targetName)
-                    local range = State.farmRange or 14
-                    local melee = State.farmMelee or 9
+                    local melee = State.farmMelee or 6
 
-                    -- keep closing until inside melee (bosses like Thunder God need this)
-                    if dist > melee + 1.5 and tick() - lastFly > 0.25 then
+                    if dist > melee + 2 and tick() - lastFly > 0.3 then
                         lastFly = tick()
                         State.status = string.format("close Â· %.0fd", dist)
                         local ok, _, cache = bvFlyTo(stand, {
                             speed = 950,
-                            arrive = math.max(4, melee * 0.55),
+                            arrive = math.max(3.5, melee * 0.5),
                             keepNoclip = true,
                             cancel = function()
                                 return not State.autoFarm or not UI.alive
                             end,
                         })
                         if cache then _farmNoclipCache = cache end
-                    elseif not _farmNoclipCache and LP.Character then
-                        _farmNoclipCache = setNoclip(LP.Character, true, {})
                     end
 
                     if State.autoFarm then
                         npc, pos, dist = findNearestEnemyModel(targetName)
                         if npc and pos then
+                            stand = farmStandPos(pos, targetName)
+                            -- CRITICAL: hold while noclip or you fall through Sky Islands
+                            farmHoldAt(stand, pos)
+
                             local aimPos = pos + Vector3.new(0, 2, 0)
                             setVirtualAim(aimPos, npc)
                             faceWorld(pos)
 
                             local now = tick()
-                            -- M1 only in real melee range (tested: Thunder God hits at ~5)
-                            if State.farmM1 and dist <= (melee + 4) and now - State.lastFarmM1 >= 0.10 then
+                            if State.farmM1 and dist <= (melee + 3) and now - State.lastFarmM1 >= 0.09 then
                                 State.lastFarmM1 = now
                                 doFarmM1()
                             end
@@ -3775,11 +3832,19 @@ task.spawn(function()
                             local hum = npc:FindFirstChildOfClass("Humanoid")
                             local hp = hum and math.floor(hum.Health) or 0
                             local fruit = currentFruitName() or "?"
-                            State.status = string.format("%s Â· %s Â· %dhp Â· %.0fd", fruit, targetName, hp, dist or 0)
+                            local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+                            State.status = string.format(
+                                "%s Â· %s Â· %dhp Â· %.0fd Â· %s",
+                                fruit,
+                                targetName,
+                                hp,
+                                dist or 0,
+                                tool and tool.Name or "no tool"
+                            )
                         end
                     end
                 else
-                    -- No live NPC streamed â€” travel to pad / stand for this target
+                    stopFarmHold()
                     clearVirtualAim()
                     if tick() - lastFly > 0.9 then
                         lastFly = tick()
@@ -3788,7 +3853,7 @@ task.spawn(function()
                             State.status = string.format("goto Â· %s Â· %.0fd", tostring(kind or "pad"), dist0 or 0)
                             local ok, _, cache = bvFlyTo(farmStandPos(stand, targetName), {
                                 speed = 900,
-                                arrive = 12,
+                                arrive = 10,
                                 keepNoclip = true,
                                 cancel = function()
                                     return not State.autoFarm or not UI.alive
@@ -3806,9 +3871,11 @@ task.spawn(function()
                     end
                 end
             elseif not targetName then
+                stopFarmHold()
                 clearVirtualAim()
                 State.status = "no farm target"
             else
+                stopFarmHold()
                 clearVirtualAim()
                 State.status = "no character"
             end
@@ -3816,8 +3883,9 @@ task.spawn(function()
                 lastPanel = tick()
                 pcall(refreshPanel)
             end
-            task.wait(0.08)
+            task.wait(0.06)
         else
+            stopFarmHold()
             if Aim.on then clearVirtualAim() end
             task.wait(0.25)
         end
