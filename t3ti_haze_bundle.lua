@@ -2335,32 +2335,66 @@ end
 if Persist.autoAccept ~= nil then
     State.autoAccept = Persist.autoAccept and true or false
 end
+if Persist.autoBuso ~= nil then
+    State.autoBuso = Persist.autoBuso and true or false
+end
+if Persist.autoHaki ~= nil then
+    State.autoHaki = Persist.autoHaki and true or false
+end
 getgenv().T3TI_State = State
 getgenv().T3TI_FarmErr = nil
 
 local function savePersist()
     Persist.autoFarm = State.autoFarm and true or false
     Persist.autoAccept = State.autoAccept and true or false
+    Persist.autoBuso = State.autoBuso and true or false
+    Persist.autoHaki = State.autoHaki and true or false
 end
 
 -- MUST be after State (Luau treats earlier refs as a different nil global)
-local function ensureAutoHaki()
-    if not (State.autoBuso or State.autoHaki) then return end
-    if tick() - (State.lastHakiToggle or 0) < 0.85 then return end
+local function ensureAutoHaki(force)
+    if not (State.autoBuso or State.autoHaki) then return false end
+    if not force and tick() - (State.lastHakiToggle or 0) < 0.35 then
+        return false
+    end
     local flags = charHakiFlags()
-    if not flags then return end
+    if not flags then return false end
 
+    local pressed = false
+    -- Buso (Armament) — keep ON
     if State.autoBuso and flags.buso and flags.buso.Value ~= true then
         State.lastHakiToggle = tick()
         pressAbilityKey(readAbilityKey("HakiBuso", "J"))
-        return
+        pressed = true
+        task.wait(0.12)
+        flags = charHakiFlags() or flags
     end
+    -- Observation Haki — keep ON
     if State.autoHaki and flags.obs and flags.obs.Value ~= true then
         State.lastHakiToggle = tick()
         pressAbilityKey(readAbilityKey("HakiObs", "K"))
-        return
+        pressed = true
     end
+    return pressed
 end
+
+-- Always-on keeper (not tied to farm). Re-enables after death / knockoff.
+task.spawn(function()
+    while UI.alive do
+        pcall(ensureAutoHaki)
+        task.wait(0.4)
+    end
+end)
+
+LP.CharacterAdded:Connect(function()
+    task.delay(1.0, function()
+        if UI.alive then
+            pcall(function()
+                ensureAutoHaki(true)
+            end)
+        end
+    end)
+end)
 
 local function notify(t, b, k)
     UI.Notify(t, b or "", 3, k or "good")
@@ -3745,14 +3779,24 @@ do
         State.autoAccept = v
         savePersist()
     end)
-    s1:Toggle("Auto Buso (J)", true, function(v)
+    s1:Toggle("Auto Buso (J)", State.autoBuso, function(v)
         State.autoBuso = v
-        if v then ensureAutoHaki() end
+        savePersist()
+        if v then
+            task.spawn(function()
+                ensureAutoHaki(true)
+            end)
+        end
         notify("Haki", v and "Buso auto ON" or "Buso auto OFF", v and "good" or "bad")
     end)
-    s1:Toggle("Auto Haki / Obs (K)", true, function(v)
+    s1:Toggle("Auto Haki / Obs (K)", State.autoHaki, function(v)
         State.autoHaki = v
-        if v then ensureAutoHaki() end
+        savePersist()
+        if v then
+            task.spawn(function()
+                ensureAutoHaki(true)
+            end)
+        end
         notify("Haki", v and "Obs Haki auto ON" or "Obs Haki auto OFF", v and "good" or "bad")
     end)
 end
