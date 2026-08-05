@@ -1940,7 +1940,8 @@ function S:PlayBootIntro(onDone)
             end)
         end
         self._booting = false
-        if onDone then pcall(onDone) end
+        -- skip reveal if we were destroyed / unloaded mid-intro
+        if onDone and self.alive then pcall(onDone) end
     end
 
     if snd then

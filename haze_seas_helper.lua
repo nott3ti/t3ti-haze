@@ -582,6 +582,26 @@ do
     s1:Toggle("UI Sounds", true, function(v)
         UI.soundsEnabled = v
     end)
+
+    local s2 = tab:Section("Session")
+    s2:Label("Stops autos + removes Drawing UI")
+    s2:Button("Unload / Uninject", function()
+        State.autoAccept = false
+        State.autoFruit = false
+        State.autoSkill = false
+        State.status = "unloaded"
+        notify("T3ti", "unloading...", "bad")
+        task.defer(function()
+            pcall(function()
+                if UI and UI.Destroy then
+                    UI:Destroy()
+                end
+            end)
+            _G.T3TI_UI = nil
+            _G.SEIM_UI = nil
+            print("[T3ti] unloaded")
+        end)
+    end)
 end
 
 --------------------------------------------------------------------
@@ -679,7 +699,9 @@ function refreshPanel()
     questPanel.title = "T3ti Quest [Lv" .. lvl .. "] · " .. (best and best.key or "none")
     if questPanel.titleT then questPanel.titleT.Text = questPanel.title end
 
+    local userName = LP.Name
     playerPanel:Set({
+        { left = "User", right = userName, color = UI.Theme.accent },
         { left = "Level", right = tostring(lvl), color = UI.Theme.text },
         { left = "EXP", right = fmtNum(xp), color = UI.Theme.label },
         { left = "Cash", right = fmtNum(cash), color = UI.Theme.good },
@@ -691,7 +713,7 @@ function refreshPanel()
         { left = "Style", right = tostring(style), color = UI.Theme.label },
         { left = "Race", right = tostring(race), color = UI.Theme.label },
     })
-    playerPanel.title = "T3ti Player [Lv" .. lvl .. "]"
+    playerPanel.title = "T3ti Player · " .. userName
     if playerPanel.titleT then playerPanel.titleT.Text = playerPanel.title end
 
     statsPanel:Set({

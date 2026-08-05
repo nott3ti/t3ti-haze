@@ -1,9 +1,6 @@
+-- t3ti_haze_bundle
 --[[
-  T3ti Haze Seas — distributable bundle
-  loadstring(game:HttpGet("https://raw.githubusercontent.com/__GH_USER__/t3ti-haze/main/t3ti_haze_bundle.lua"))()
-]]
---[[
-    T3ti UI — Drawing API menu framework
+    T3ti UI â€” Drawing API menu framework
     Standalone: no ESP / aimbot / game logic.
 
     Usage:
@@ -89,7 +86,7 @@ function S:KeyName(vk)
     return self.VK[vk] or ("VK" .. tostring(vk))
 end
 
--- Mouse buttons / XButtons — never allow as menu or keybind
+-- Mouse buttons / XButtons â€” never allow as menu or keybind
 S.MOUSE_VKS = {
     [0x01] = true, -- LMB
     [0x02] = true, -- RMB
@@ -117,7 +114,7 @@ function S:SetMenuKey(vk)
 end
 
 -- Win32 VK -> Roblox KeyCode
--- Potassium/Volt Input Library has NO iskeypressed — use UserInputService.
+-- Potassium/Volt Input Library has NO iskeypressed â€” use UserInputService.
 S.VK_TO_KEYCODE = {}
 do
     local function map(vk, name)
@@ -428,7 +425,7 @@ local function viewport()
 end
 
 --------------------------------------------------------------------
--- Mouse (UIS — this executor has no ismouse1pressed / iskeypressed)
+-- Mouse (UIS â€” this executor has no ismouse1pressed / iskeypressed)
 --------------------------------------------------------------------
 local M = {
     x = 0, y = 0,
@@ -446,13 +443,13 @@ local function unlockMouseForMenu(want)
                 S._prevMouseBehavior = UserInputService.MouseBehavior
                 S._menuUnlocked = true
             end
-            -- game combat scripts re-lock every frame — keep forcing Default while open
+            -- game combat scripts re-lock every frame â€” keep forcing Default while open
             if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
                 UserInputService.MouseBehavior = Enum.MouseBehavior.Default
             end
         end)
     elseif S._menuUnlocked then
-        -- Don't force Lock* back — that soft-locks the cursor after close.
+        -- Don't force Lock* back â€” that soft-locks the cursor after close.
         -- Leave Default; the game re-applies its own lock next frame if needed.
         pcall(function()
             UserInputService.MouseBehavior = Enum.MouseBehavior.Default
@@ -1855,8 +1852,8 @@ local function loadIntroWav()
     -- Pull from local MCP HTTP and cache into executor workspace
     if type(writefile) == "function" then
         local urls = {
-            "https://raw.githubusercontent.com/__GH_USER__/t3ti-haze/main/t3ti-intro/untitled.wav",
-            "https://raw.githubusercontent.com/__GH_USER__/t3ti-haze/main/t3ti-intro/untitled.wav",
+            "http://127.0.0.1:16385/untitled.wav",
+            "http://127.0.0.1:16384/t3ti-intro/untitled.wav",
         }
         for _, url in ipairs(urls) do
             local ok, data = pcall(function() return game:HttpGet(url) end)
@@ -1944,7 +1941,8 @@ function S:PlayBootIntro(onDone)
             end)
         end
         self._booting = false
-        if onDone then pcall(onDone) end
+        -- skip reveal if we were destroyed / unloaded mid-intro
+        if onDone and self.alive then pcall(onDone) end
     end
 
     if snd then
@@ -2098,7 +2096,7 @@ S:Connect(RunService.RenderStepped, function(dt)
     end
     keyWas = kd
 
-    -- Haze / combat games lock mouse — unlock while menu is open so clicks work
+    -- Haze / combat games lock mouse â€” unlock while menu is open so clicks work
     unlockMouseForMenu(S.uiVisible)
 
     local used = false
@@ -2141,23 +2139,12 @@ S:Connect(RunService.RenderStepped, function(dt)
     drawCursor(S.showCursor and S.uiVisible)
 end)
 
+-- quiet boot â€” helper triggers intro + notify
 -- quiet boot — helper triggers intro + notify
 -- return S (bundled)
 
---[[
-    Haze Seas Helper — T3ti UI
-    Requires t3ti_ui.lua / seim_ui.lua in executor workspace.
-
-    Features:
-      - Quest: best available, accept anywhere, auto-accept, warp to island then accept
-      - Travel: SetSpawnPoint + TeleportToHome
-      - Stats: dump free points into Fruit
-      - Skills: fire Tremor fruit remotes / SkillUsed
-      - Panels: quest status, player info, stat points
-]]
-
 local UI = (_G.T3TI_UI or _G.SEIM_UI)
-assert(UI and UI.Window, '[T3ti] UI incomplete')
+assert(UI and UI.Window and UI.PlayBootIntro, '[T3ti] UI incomplete')
 UI.showCursor = true
 UI.hideSystemCursor = true
 UI.watermark = game.Players.LocalPlayer.Name
@@ -2474,7 +2461,7 @@ end
 
 --[[
   Safe stand offsets from spawn-pad center (out of melee, still can aim pad).
-  Calibrated: Marine Captain — player's rooftop perch ~276 flat / +162 up.
+  Calibrated: Marine Captain â€” player's rooftop perch ~276 flat / +162 up.
 ]]
 local SAFE_PAD_OFFSET = {
     ["Marine Captain"] = Vector3.new(-259.4, 161.6, 94.3),
@@ -2602,12 +2589,12 @@ do
     end
 
     local s3 = tab:Section("Sea Rift Clear")
-    s3:Label("Safe perch → aim spawn pad → Sea Rift")
+    s3:Label("Safe perch â†’ aim spawn pad â†’ Sea Rift")
     s3:Button("Pad Clear (test)", function()
         task.spawn(function()
             local ok, err, target, pad = seaRiftPadClear()
             if ok then
-                notify("Sea Rift", "cleared aim · " .. tostring(target), "good")
+                notify("Sea Rift", "cleared aim Â· " .. tostring(target), "good")
             else
                 notify("Sea Rift", tostring(err), "bad")
             end
@@ -2642,11 +2629,11 @@ do
     local tab = win:Tab("Stats")
     local s1 = tab:Section("Fruit")
     s1:Label("Fires Stats_Event Fruit with free points")
-    s1:Button("Dump 1 Point → Fruit", function()
+    s1:Button("Dump 1 Point â†’ Fruit", function()
         local ok, err = dumpFruit(1)
         notify("Stats", ok and "sent 1" or tostring(err), ok and "good" or "bad")
     end)
-    s1:Button("Dump All → Fruit", function()
+    s1:Button("Dump All â†’ Fruit", function()
         local v = freeStatPoints()
         local n = v and math.floor(v.Value) or 0
         if n <= 0 then
@@ -2669,7 +2656,7 @@ do
     s2:Dropdown("Skill", skills, State.skillName, function(v) State.skillName = v end)
     s2:Toggle("Auto Skill", false, function(v)
         State.autoSkill = v
-        notify("Auto Skill", v and ("ON · " .. State.skillName) or "OFF", v and "good" or "bad")
+        notify("Auto Skill", v and ("ON Â· " .. State.skillName) or "OFF", v and "good" or "bad")
     end)
     s2:Slider("Cooldown", 30, 5, 100, "x100ms", function(v)
         State.skillCd = v / 10
@@ -2700,6 +2687,26 @@ do
     end)
     s1:Toggle("UI Sounds", true, function(v)
         UI.soundsEnabled = v
+    end)
+
+    local s2 = tab:Section("Session")
+    s2:Label("Stops autos + removes Drawing UI")
+    s2:Button("Unload / Uninject", function()
+        State.autoAccept = false
+        State.autoFruit = false
+        State.autoSkill = false
+        State.status = "unloaded"
+        notify("T3ti", "unloading...", "bad")
+        task.defer(function()
+            pcall(function()
+                if UI and UI.Destroy then
+                    UI:Destroy()
+                end
+            end)
+            _G.T3TI_UI = nil
+            _G.SEIM_UI = nil
+            print("[T3ti] unloaded")
+        end)
     end)
 end
 
@@ -2780,7 +2787,7 @@ function refreshPanel()
     local style = val(PD:FindFirstChild("FightingStyle"), "-")
     local race = val(PD:FindFirstChild("Race"), "-")
     local fruit = currentFruit()
-    local bestLabel = best and (best.key .. " · " .. tostring(best.display)) or "none"
+    local bestLabel = best and (best.key .. " Â· " .. tostring(best.display)) or "none"
     State.bestLabel = bestLabel
 
     questPanel:Set({
@@ -2795,10 +2802,12 @@ function refreshPanel()
           color = State.autoAccept and UI.Theme.good or UI.Theme.bad },
         { left = "Status", right = tostring(State.status):sub(1, 20), color = UI.Theme.accent },
     })
-    questPanel.title = "T3ti Quest [Lv" .. lvl .. "] · " .. (best and best.key or "none")
+    questPanel.title = "T3ti Quest [Lv" .. lvl .. "] Â· " .. (best and best.key or "none")
     if questPanel.titleT then questPanel.titleT.Text = questPanel.title end
 
+    local userName = LP.Name
     playerPanel:Set({
+        { left = "User", right = userName, color = UI.Theme.accent },
         { left = "Level", right = tostring(lvl), color = UI.Theme.text },
         { left = "EXP", right = fmtNum(xp), color = UI.Theme.label },
         { left = "Cash", right = fmtNum(cash), color = UI.Theme.good },
@@ -2810,7 +2819,7 @@ function refreshPanel()
         { left = "Style", right = tostring(style), color = UI.Theme.label },
         { left = "Race", right = tostring(race), color = UI.Theme.label },
     })
-    playerPanel.title = "T3ti Player [Lv" .. lvl .. "]"
+    playerPanel.title = "T3ti Player Â· " .. userName
     if playerPanel.titleT then playerPanel.titleT.Text = playerPanel.title end
 
     statsPanel:Set({
@@ -2890,7 +2899,7 @@ local function revealUI()
     end
     refreshPanel()
     UI:PlayUI("open")
-    notify("T3ti", "Haze helper ready — RCtrl menu", "good")
+    notify("T3ti", "Haze helper ready â€” RCtrl menu", "good")
     print("[T3ti] Haze Seas helper loaded")
 end
 
