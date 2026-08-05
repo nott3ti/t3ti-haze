@@ -681,10 +681,9 @@ local function questKillStand(targetName)
 end
 
 --[[
-  Fast noclip BV fly:
-  - Refresh CanCollide=false every few frames (gear/humanoid resets it)
-  - PlatformStand so humanoid does not fight the mover
-  - If stuck, lift over then continue (no jam-then-shove)
+  Straight-line noclip BV fly.
+  Refresh CanCollide=false + PlatformStand.
+  Stuck = sideways nudge only — never +Y sky hop.
 ]]
 local _questFlyToken = 0
 local _farmNoclipCache = nil
@@ -750,11 +749,14 @@ local function bvFlyTo(goal, opts)
 
     _questFlyToken += 1
     local token = _questFlyToken
-    local speed = opts.speed or 900
+    local speed = opts.speed or 700
     local arrive = opts.arrive or 12
     local keepNoclip = opts.keepNoclip == true
 
-    for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro", "T3tiFarmHold", "T3tiFarmGyro" }) do
+    for _, n in ipairs({
+        "T3tiQuestFly", "T3tiQuestGyro", "T3tiFarmHold", "T3tiFarmGyro",
+        "T3tiAF", "T3tiAFG", "T3tiTest", "T3tiTestG", "T3tiRescue",
+    }) do
         local old = hrp:FindFirstChild(n)
         if old then pcall(function() old:Destroy() end) end
     end
@@ -803,18 +805,20 @@ local function bvFlyTo(goal, opts)
     local lastPos = hrp.Position
     local stuckFor = 0
     local tickN = 0
-    local lifting = 0
+    local sideSign = 1
 
     while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
         if opts.cancel and opts.cancel() then break end
         tickN += 1
-        if tickN % 3 == 0 then
+        if tickN % 2 == 0 then
             setNoclip(char, true, collCache)
             setFlyHumanoid(hum, true)
         end
 
         local pos = hrp.Position
-        local delta = goal - pos
+        -- always aim at goal; if above it, dive (never climb further)
+        local target = goal
+        local delta = target - pos
         local dist = delta.Magnitude
         if dist <= arrive then
             okArrive = true
@@ -822,7 +826,7 @@ local function bvFlyTo(goal, opts)
         end
 
         local moved = (pos - lastPos).Magnitude
-        if dist > arrive + 4 and moved < 0.45 then
+        if dist > arrive + 4 and moved < 0.4 then
             stuckFor += 1
         else
             stuckFor = math.max(0, stuckFor - 2)
@@ -831,41 +835,39 @@ local function bvFlyTo(goal, opts)
 
         local dir = delta.Unit
         local v = speed
-        local above = pos.Y - goal.Y
 
-        -- if we got yeeted into the sky, dive back to the goal — never keep lifting
-        if above > 35 then
-            lifting = 0
+        -- stuck: sideways around obstacle (XZ), pull Y toward goal only — no sky hop
+        if stuckFor >= 6 then
             stuckFor = 0
-            dir = delta.Unit
-            v = speed
-        elseif stuckFor >= 8 then
-            lifting = 10
-            stuckFor = 0
+            sideSign = -sideSign
+            local flat = Vector3.new(delta.X, 0, delta.Z)
+            local side
+            if flat.Magnitude > 1 then
+                side = Vector3.new(-flat.Z, 0, flat.X).Unit * sideSign
+            else
+                side = Vector3.new(sideSign, 0, 0)
+            end
+            local bypass = pos
+                + side * 18
+                + Vector3.new(0, math.clamp(goal.Y - pos.Y, -10, 10), 0)
+            bypass = bypass:Lerp(goal, 0.45)
+            local bd = bypass - pos
+            if bd.Magnitude > 1e-3 then
+                dir = bd.Unit
+            end
+            v = math.clamp(speed * 0.85, 220, 650)
+        elseif dist < 30 then
+            v = math.clamp(speed * (dist / 30), 120, speed)
         end
 
-        if lifting > 0 then
-            lifting -= 1
-            local maxLiftY = goal.Y + 25
-            if pos.Y >= maxLiftY then
-                lifting = 0
-                dir = delta.Unit
+        -- hard ceiling: never drive upward past goal+25
+        if pos.Y > goal.Y + 25 and dir.Y > 0 then
+            dir = Vector3.new(dir.X, -0.35, dir.Z)
+            if dir.Magnitude > 1e-3 then
+                dir = dir.Unit
             else
-                -- brief hop over obstacle, still biased toward goal
-                local hop = Vector3.new(
-                    pos.X + dir.X * 14,
-                    math.min(pos.Y + 10, maxLiftY),
-                    pos.Z + dir.Z * 14
-                )
-                hop = hop:Lerp(goal, 0.35)
-                local hopDelta = hop - pos
-                if hopDelta.Magnitude > 1e-3 then
-                    dir = hopDelta.Unit
-                end
-                v = math.clamp(speed * 0.7, 200, 600)
+                dir = Vector3.new(0, -1, 0)
             end
-        elseif dist < 35 then
-            v = math.clamp(speed * (dist / 35), 140, speed)
         end
 
         bv.Velocity = dir * v
@@ -905,6 +907,20 @@ local function farmHoldAt(goal, lookAt)
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or typeof(goal) ~= "Vector3" then return end
+
+    -- never hold in the sky above the combat stand / look target
+    local ceilY = goal.Y + 8
+    if typeof(lookAt) == "Vector3" then
+        ceilY = math.min(ceilY, lookAt.Y + 10)
+    end
+    if goal.Y > ceilY then
+        goal = Vector3.new(goal.X, ceilY, goal.Z)
+    end
+    if hrp.Position.Y > ceilY + 15 then
+        -- snap pull down instead of floating forever
+        goal = Vector3.new(goal.X, goal.Y, goal.Z)
+    end
+
     _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
     setFlyHumanoid(hum, true)
 
@@ -933,7 +949,12 @@ local function farmHoldAt(goal, lookAt)
             hrp.AssemblyLinearVelocity = Vector3.zero
         end)
     else
-        bv.Velocity = delta.Unit * math.clamp(dist * 16, 40, 420)
+        -- dive harder when above stand
+        local spd = math.clamp(dist * 18, 50, 520)
+        if hrp.Position.Y > goal.Y + 12 then
+            spd = math.clamp(dist * 28, 200, 900)
+        end
+        bv.Velocity = delta.Unit * spd
     end
     local look = lookAt or goal
     bg.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
@@ -1764,7 +1785,7 @@ task.spawn(function()
                             lastFly = tick()
                             State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
                             local ok, _, cache = bvFlyTo(stand, {
-                                speed = 950,
+                                speed = 700,
                                 arrive = math.max(2.5, melee * 0.35),
                                 keepNoclip = true,
                                 cancel = function()

@@ -1,6 +1,6 @@
 -- t3ti_haze_bundle
 --[[
-    T3ti UI â€” Drawing API menu framework
+    T3ti UI — Drawing API menu framework
     Standalone: no ESP / aimbot / game logic.
 
     Usage:
@@ -87,7 +87,7 @@ function S:KeyName(vk)
     return self.VK[vk] or ("VK" .. tostring(vk))
 end
 
--- Mouse buttons / XButtons â€” never allow as menu or keybind
+-- Mouse buttons / XButtons — never allow as menu or keybind
 S.MOUSE_VKS = {
     [0x01] = true, -- LMB
     [0x02] = true, -- RMB
@@ -115,7 +115,7 @@ function S:SetMenuKey(vk)
 end
 
 -- Win32 VK -> Roblox KeyCode
--- Potassium/Volt Input Library has NO iskeypressed â€” use UserInputService.
+-- Potassium/Volt Input Library has NO iskeypressed — use UserInputService.
 S.VK_TO_KEYCODE = {}
 do
     local function map(vk, name)
@@ -372,7 +372,7 @@ local function mkText(str, size, col, center)
     d.Text = str or ""
     d.Color = col or T.text
     d.Center = center and true or false
-    -- Outline = sharp readable text on busy game backgrounds (was false â†’ looked blurry)
+    -- Outline = sharp readable text on busy game backgrounds (was false → looked blurry)
     d.Outline = true
     prop(d, "OutlineColor", Color3.fromRGB(0, 0, 0))
     prop(d, "Font", S.font or Drawing.Fonts.UI or Drawing.Fonts.Monospace)
@@ -442,7 +442,7 @@ local function viewport()
 end
 
 --------------------------------------------------------------------
--- Mouse (UIS â€” this executor has no ismouse1pressed / iskeypressed)
+-- Mouse (UIS — this executor has no ismouse1pressed / iskeypressed)
 --------------------------------------------------------------------
 local M = {
     x = 0, y = 0,
@@ -460,13 +460,13 @@ local function unlockMouseForMenu(want)
                 S._prevMouseBehavior = UserInputService.MouseBehavior
                 S._menuUnlocked = true
             end
-            -- game combat scripts re-lock every frame â€” keep forcing Default while open
+            -- game combat scripts re-lock every frame — keep forcing Default while open
             if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
                 UserInputService.MouseBehavior = Enum.MouseBehavior.Default
             end
         end)
     elseif S._menuUnlocked then
-        -- Don't force Lock* back â€” that soft-locks the cursor after close.
+        -- Don't force Lock* back — that soft-locks the cursor after close.
         -- Leave Default; the game re-applies its own lock next frame if needed.
         pcall(function()
             UserInputService.MouseBehavior = Enum.MouseBehavior.Default
@@ -2162,7 +2162,7 @@ S:Connect(RunService.RenderStepped, function(dt)
     end
     keyWas = kd
 
-    -- Haze / combat games lock mouse â€” unlock while menu is open so clicks work
+    -- Haze / combat games lock mouse — unlock while menu is open so clicks work
     unlockMouseForMenu(S.uiVisible)
 
     local used = false
@@ -2205,9 +2205,20 @@ S:Connect(RunService.RenderStepped, function(dt)
     drawCursor(S.showCursor and S.uiVisible)
 end)
 
--- quiet boot â€” helper triggers intro + notify
 -- quiet boot — helper triggers intro + notify
 -- return S (bundled)
+
+--[[
+    Haze Seas Helper — T3ti UI
+    Requires t3ti_ui.lua / seim_ui.lua in executor workspace.
+
+    Features:
+      - Quest: best available, accept anywhere, auto-accept, warp to island then accept
+      - Travel: SetSpawnPoint + TeleportToHome
+      - Stats: dump free points into Fruit
+      - Skills: fire Tremor fruit remotes / SkillUsed
+      - Panels: quest status, player info, stat points
+]]
 
 local UI = (_G.T3TI_UI or _G.SEIM_UI)
 assert(UI and UI.Window and UI.PlayBootIntro, '[T3ti] UI incomplete')
@@ -2258,8 +2269,8 @@ local State = {
     -- Auto Farm
     autoFarm = false,
     farmSkills = true,
-    farmM1 = true, -- in-game tool:Activate â€” works unfocused, mouse stays free
-    farmClick = false, -- OS mouse1click â€” NEVER needed; clicks outside Roblox
+    farmM1 = true, -- in-game tool:Activate — works unfocused, mouse stays free
+    farmClick = false, -- OS mouse1click — NEVER needed; clicks outside Roblox
     farmMode = "Quest Target", -- or "Selected Enemy"
     farmEnemy = "Holy Soldier",
     farmRange = 10,
@@ -2507,7 +2518,7 @@ local function findToolByName(name)
         or (bp and bp:FindFirstChild(name))
 end
 
--- M1 tool: Auto â†’ tool named like current fruit, else held tool, else Combat
+-- M1 tool: Auto → tool named like current fruit, else held tool, else Combat
 local function resolveM1Tool()
     local char = LP.Character
     local pick = State.m1Tool
@@ -2633,7 +2644,7 @@ local function castSkill(name)
     return false, "skill remote missing"
 end
 
--- In-game M1 via fruit/weapon tool Activate â€” no OS click, mouse stays free
+-- In-game M1 via fruit/weapon tool Activate — no OS click, mouse stays free
 local function doFarmM1()
     -- allow during farm even if menu somehow open
     if UI._booting then
@@ -2671,7 +2682,7 @@ local function cleanEnemyName(name)
 end
 
 -- Active kill quest only ("Kill 5 Holy Soldiers" -> "Holy Soldier").
--- Do NOT use "Quest: Title" â€” that's the quest name, not the NPC (and shows even when inactive).
+-- Do NOT use "Quest: Title" — that's the quest name, not the NPC (and shows even when inactive).
 local function currentQuestTarget()
     local qg = QuestGui
     if not qg then return nil end
@@ -2721,7 +2732,7 @@ end
 
 --[[
   Safe stand offsets from spawn-pad center (out of melee, still can aim pad).
-  Calibrated: Marine Captain â€” player's rooftop perch ~276 flat / +162 up.
+  Calibrated: Marine Captain — player's rooftop perch ~276 flat / +162 up.
 ]]
 local SAFE_PAD_OFFSET = {
     ["Marine Captain"] = Vector3.new(-259.4, 161.6, 94.3),
@@ -2747,10 +2758,10 @@ local function safeStandForPad(pad, targetName)
     return pad + Vector3.new(-220, 150, 80)
 end
 
--- Name aliases. Holy Soldier â‰  Divine Soldier (different pads/heights).
+-- Name aliases. Holy Soldier ≠ Divine Soldier (different pads/heights).
 -- Only alias when names are truly interchangeable.
 local QUEST_NPC_ALIASES = {
-    -- none for holy/divine â€” keep them separate
+    -- none for holy/divine — keep them separate
 }
 
 local function questTargetKeys(targetName)
@@ -2763,7 +2774,7 @@ local function npcNameMatches(instName, keys)
     local n = tostring(instName or ""):lower()
     n = n:gsub("%d+$", ""):gsub("%s+$", "")
     for _, k in ipairs(keys) do
-        -- exact / contains key only â€” avoid k:find(n) which lets "soldier" match everything
+        -- exact / contains key only — avoid k:find(n) which lets "soldier" match everything
         if n == k or n:find(k, 1, true) then
             return true
         end
@@ -2789,7 +2800,7 @@ end
 
 --[[
   Pick stand for current kill quest.
-  Prefer nearest LIVE npc matching the quest name exactly (Holy â‰  Divine).
+  Prefer nearest LIVE npc matching the quest name exactly (Holy ≠ Divine).
   Else nearest ObservationHaki pad for that name (Holy pads sit higher on Sky Islands).
 ]]
 local function questKillStand(targetName)
@@ -2853,10 +2864,9 @@ local function questKillStand(targetName)
 end
 
 --[[
-  Fast noclip BV fly:
-  - Refresh CanCollide=false every few frames (gear/humanoid resets it)
-  - PlatformStand so humanoid does not fight the mover
-  - If stuck, lift over then continue (no jam-then-shove)
+  Straight-line noclip BV fly.
+  Refresh CanCollide=false + PlatformStand.
+  Stuck = sideways nudge only — never +Y sky hop.
 ]]
 local _questFlyToken = 0
 local _farmNoclipCache = nil
@@ -2922,11 +2932,14 @@ local function bvFlyTo(goal, opts)
 
     _questFlyToken += 1
     local token = _questFlyToken
-    local speed = opts.speed or 900
+    local speed = opts.speed or 700
     local arrive = opts.arrive or 12
     local keepNoclip = opts.keepNoclip == true
 
-    for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro", "T3tiFarmHold", "T3tiFarmGyro" }) do
+    for _, n in ipairs({
+        "T3tiQuestFly", "T3tiQuestGyro", "T3tiFarmHold", "T3tiFarmGyro",
+        "T3tiAF", "T3tiAFG", "T3tiTest", "T3tiTestG", "T3tiRescue",
+    }) do
         local old = hrp:FindFirstChild(n)
         if old then pcall(function() old:Destroy() end) end
     end
@@ -2975,18 +2988,20 @@ local function bvFlyTo(goal, opts)
     local lastPos = hrp.Position
     local stuckFor = 0
     local tickN = 0
-    local lifting = 0
+    local sideSign = 1
 
     while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
         if opts.cancel and opts.cancel() then break end
         tickN += 1
-        if tickN % 3 == 0 then
+        if tickN % 2 == 0 then
             setNoclip(char, true, collCache)
             setFlyHumanoid(hum, true)
         end
 
         local pos = hrp.Position
-        local delta = goal - pos
+        -- always aim at goal; if above it, dive (never climb further)
+        local target = goal
+        local delta = target - pos
         local dist = delta.Magnitude
         if dist <= arrive then
             okArrive = true
@@ -2994,7 +3009,7 @@ local function bvFlyTo(goal, opts)
         end
 
         local moved = (pos - lastPos).Magnitude
-        if dist > arrive + 4 and moved < 0.45 then
+        if dist > arrive + 4 and moved < 0.4 then
             stuckFor += 1
         else
             stuckFor = math.max(0, stuckFor - 2)
@@ -3003,41 +3018,39 @@ local function bvFlyTo(goal, opts)
 
         local dir = delta.Unit
         local v = speed
-        local above = pos.Y - goal.Y
 
-        -- if we got yeeted into the sky, dive back to the goal â€” never keep lifting
-        if above > 35 then
-            lifting = 0
+        -- stuck: sideways around obstacle (XZ), pull Y toward goal only — no sky hop
+        if stuckFor >= 6 then
             stuckFor = 0
-            dir = delta.Unit
-            v = speed
-        elseif stuckFor >= 8 then
-            lifting = 10
-            stuckFor = 0
+            sideSign = -sideSign
+            local flat = Vector3.new(delta.X, 0, delta.Z)
+            local side
+            if flat.Magnitude > 1 then
+                side = Vector3.new(-flat.Z, 0, flat.X).Unit * sideSign
+            else
+                side = Vector3.new(sideSign, 0, 0)
+            end
+            local bypass = pos
+                + side * 18
+                + Vector3.new(0, math.clamp(goal.Y - pos.Y, -10, 10), 0)
+            bypass = bypass:Lerp(goal, 0.45)
+            local bd = bypass - pos
+            if bd.Magnitude > 1e-3 then
+                dir = bd.Unit
+            end
+            v = math.clamp(speed * 0.85, 220, 650)
+        elseif dist < 30 then
+            v = math.clamp(speed * (dist / 30), 120, speed)
         end
 
-        if lifting > 0 then
-            lifting -= 1
-            local maxLiftY = goal.Y + 25
-            if pos.Y >= maxLiftY then
-                lifting = 0
-                dir = delta.Unit
+        -- hard ceiling: never drive upward past goal+25
+        if pos.Y > goal.Y + 25 and dir.Y > 0 then
+            dir = Vector3.new(dir.X, -0.35, dir.Z)
+            if dir.Magnitude > 1e-3 then
+                dir = dir.Unit
             else
-                -- brief hop over obstacle, still biased toward goal
-                local hop = Vector3.new(
-                    pos.X + dir.X * 14,
-                    math.min(pos.Y + 10, maxLiftY),
-                    pos.Z + dir.Z * 14
-                )
-                hop = hop:Lerp(goal, 0.35)
-                local hopDelta = hop - pos
-                if hopDelta.Magnitude > 1e-3 then
-                    dir = hopDelta.Unit
-                end
-                v = math.clamp(speed * 0.7, 200, 600)
+                dir = Vector3.new(0, -1, 0)
             end
-        elseif dist < 35 then
-            v = math.clamp(speed * (dist / 35), 140, speed)
         end
 
         bv.Velocity = dir * v
@@ -3077,6 +3090,20 @@ local function farmHoldAt(goal, lookAt)
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or typeof(goal) ~= "Vector3" then return end
+
+    -- never hold in the sky above the combat stand / look target
+    local ceilY = goal.Y + 8
+    if typeof(lookAt) == "Vector3" then
+        ceilY = math.min(ceilY, lookAt.Y + 10)
+    end
+    if goal.Y > ceilY then
+        goal = Vector3.new(goal.X, ceilY, goal.Z)
+    end
+    if hrp.Position.Y > ceilY + 15 then
+        -- snap pull down instead of floating forever
+        goal = Vector3.new(goal.X, goal.Y, goal.Z)
+    end
+
     _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
     setFlyHumanoid(hum, true)
 
@@ -3105,7 +3132,12 @@ local function farmHoldAt(goal, lookAt)
             hrp.AssemblyLinearVelocity = Vector3.zero
         end)
     else
-        bv.Velocity = delta.Unit * math.clamp(dist * 16, 40, 420)
+        -- dive harder when above stand
+        local spd = math.clamp(dist * 18, 50, 520)
+        if hrp.Position.Y > goal.Y + 12 then
+            spd = math.clamp(dist * 28, 200, 900)
+        end
+        bv.Velocity = delta.Unit * spd
     end
     local look = lookAt or goal
     bg.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(look.X, hrp.Position.Y, look.Z))
@@ -3130,8 +3162,8 @@ local function slowTweenToQuestTarget()
     local stand, countOrErr, targetName, kind, dist0 = questKillStand()
     if not stand then return false, countOrErr end
     local ok, info = bvFlyTo(stand, { speed = 900, arrive = 12 })
-    if not ok then return false, tostring(info) .. " Â· " .. tostring(kind) end
-    return true, string.format("%s Â· BV-noclip Â· %s Â· %.0f studs", tostring(targetName), tostring(kind), dist0 or 0)
+    if not ok then return false, tostring(info) .. " · " .. tostring(kind) end
+    return true, string.format("%s · BV-noclip · %s · %.0f studs", tostring(targetName), tostring(kind), dist0 or 0)
 end
 
 -- Enemy name list from streamed NPC Zones
@@ -3224,7 +3256,7 @@ local function findNearestEnemyModel(targetName)
 end
 
 --------------------------------------------------------------------
--- Virtual mouse aim â€” spoofs Mouse.Hit / GetMouseLocation in-memory.
+-- Virtual mouse aim — spoofs Mouse.Hit / GetMouseLocation in-memory.
 -- Does NOT move the OS cursor, so you can freely look / click the UI.
 --------------------------------------------------------------------
 local Aim = {
@@ -3331,7 +3363,7 @@ local function faceWorld(pos)
 end
 
 local function farmClick()
-    -- OS-level click â€” only if user explicitly enables it (clicks outside Roblox too)
+    -- OS-level click — only if user explicitly enables it (clicks outside Roblox too)
     if UI.uiVisible or UI._booting then
         return false
     end
@@ -3482,12 +3514,12 @@ do
     end
 
     local s3 = tab:Section("Sea Rift Clear")
-    s3:Label("Safe perch â†’ aim spawn pad â†’ Sea Rift")
+    s3:Label("Safe perch → aim spawn pad → Sea Rift")
     s3:Button("Pad Clear (test)", function()
         task.spawn(function()
             local ok, err, target, pad = seaRiftPadClear()
             if ok then
-                notify("Sea Rift", "cleared aim Â· " .. tostring(target), "good")
+                notify("Sea Rift", "cleared aim · " .. tostring(target), "good")
             else
                 notify("Sea Rift", tostring(err), "bad")
             end
@@ -3517,14 +3549,14 @@ do
     end)
 
     local s2 = tab:Section("Travel to Quest")
-    s2:Label("Fast BV-noclip â†’ nearest quest NPC")
+    s2:Label("Fast BV-noclip → nearest quest NPC")
     s2:Button("Go to Quest Target", function()
         local t = currentQuestTarget()
-        notify("Travel", t and ("fly â†’ " .. t) or "no kill quest", t and "good" or "bad")
+        notify("Travel", t and ("fly → " .. t) or "no kill quest", t and "good" or "bad")
         if not t then return end
         task.spawn(function()
             local ok, info = slowTweenToQuestTarget()
-            notify("Travel", ok and ("arrived Â· " .. tostring(info)) or tostring(info), ok and "good" or "bad")
+            notify("Travel", ok and ("arrived · " .. tostring(info)) or tostring(info), ok and "good" or "bad")
         end)
     end)
 end
@@ -3543,10 +3575,10 @@ do
         else
             State.status = "farm on"
             pcall(installVirtualMouse)
-            -- no active kill quest â†’ accept best for your level (Holy Soldier @ ~1050)
+            -- no active kill quest → accept best for your level (Holy Soldier @ ~1050)
             task.spawn(function()
                 local ok, info = ensureBestQuest()
-                State.status = ok and ("quest Â· " .. tostring(info)) or ("quest? Â· " .. tostring(info))
+                State.status = ok and ("quest · " .. tostring(info)) or ("quest? · " .. tostring(info))
                 pcall(refreshPanel)
                 notify("Quest", tostring(info), ok and "good" or "bad")
             end)
@@ -3560,7 +3592,7 @@ do
     end)
     s1:Toggle("In-Game M1 (Activate)", true, function(v)
         State.farmM1 = v
-        notify("Farm", v and "M1 Â· tool Activate (mouse free)" or "M1 off", v and "good" or "bad")
+        notify("Farm", v and "M1 · tool Activate (mouse free)" or "M1 off", v and "good" or "bad")
     end)
     s1:Toggle("OS Mouse Click (bad)", false, function(v)
         State.farmClick = v
@@ -3600,7 +3632,7 @@ do
     local s1 = tab:Section("Target")
     s1:Dropdown("Farm Mode", { "Quest Target", "Selected Enemy" }, State.farmMode, function(v)
         State.farmMode = v
-        notify("Farm", "mode Â· " .. v, "good")
+        notify("Farm", "mode · " .. v, "good")
     end)
     s1:Dropdown("Enemy", enemies, State.farmEnemy, function(v)
         State.farmEnemy = v
@@ -3613,7 +3645,7 @@ do
     sWep:Label("Fruit: " .. tostring(currentFruitName() or "none"))
     sWep:Dropdown("M1 Tool", m1Choices, State.m1Tool, function(v)
         State.m1Tool = v
-        notify("M1", v == "Auto" and ("auto Â· " .. tostring(currentFruitName() or "?")) or v, "good")
+        notify("M1", v == "Auto" and ("auto · " .. tostring(currentFruitName() or "?")) or v, "good")
     end)
     sWep:Label("Auto = tool matching your equipped fruit name")
 
@@ -3657,11 +3689,11 @@ do
     local tab = win:Tab("Stats")
     local s1 = tab:Section("Fruit")
     s1:Label("Fires Stats_Event Fruit with free points")
-    s1:Button("Dump 1 Point â†’ Fruit", function()
+    s1:Button("Dump 1 Point → Fruit", function()
         local ok, err = dumpFruit(1)
         notify("Stats", ok and "sent 1" or tostring(err), ok and "good" or "bad")
     end)
-    s1:Button("Dump All â†’ Fruit", function()
+    s1:Button("Dump All → Fruit", function()
         local v = freeStatPoints()
         local n = v and math.floor(v.Value) or 0
         if n <= 0 then
@@ -3687,7 +3719,7 @@ do
     s2:Dropdown("Skill", skills, State.skillName, function(v) State.skillName = v end)
     s2:Toggle("Auto Skill", false, function(v)
         State.autoSkill = v
-        notify("Auto Skill", v and ("ON Â· " .. State.skillName) or "OFF", v and "good" or "bad")
+        notify("Auto Skill", v and ("ON · " .. State.skillName) or "OFF", v and "good" or "bad")
     end)
     s2:Slider("Cooldown", 30, 5, 100, "x100ms", function(v)
         State.skillCd = v / 10
@@ -3729,7 +3761,7 @@ do
     local sVis = tab:Section("Readability")
     sVis:Dropdown("Font", UI.FONT_NAMES or { "UI", "System", "Plex", "Monospace" }, UI.fontName or "UI", function(v)
         if UI.SetFont then UI:SetFont(v) end
-        notify("UI", "font Â· " .. tostring(v), "good")
+        notify("UI", "font · " .. tostring(v), "good")
     end)
     sVis:Slider("Text Scale", math.floor((UI.textScale or 1) * 100 + 0.5), 80, 160, "%", function(v)
         if UI.SetTextScale then UI:SetTextScale(v / 100) end
@@ -3841,7 +3873,7 @@ function refreshPanel()
     local style = val(PD:FindFirstChild("FightingStyle"), "-")
     local race = val(PD:FindFirstChild("Race"), "-")
     local fruit = currentFruit()
-    local bestLabel = best and (best.key .. " Â· " .. tostring(best.display)) or "none"
+    local bestLabel = best and (best.key .. " · " .. tostring(best.display)) or "none"
     State.bestLabel = bestLabel
 
     questPanel:Set({
@@ -3909,12 +3941,12 @@ local function farmStandPos(npcPos, _targetName, fromPos)
     if flat.Magnitude < 0.15 then
         flat = Vector3.new(1, 0, 0)
     end
-    -- stay beside at chest height â€” never park on top of the model
+    -- stay beside at chest height — never park on top of the model
     local h = math.clamp(tonumber(State.farmHeight) or 2, 0, 2.5)
     return npcPos + flat.Unit * side + Vector3.new(0, h, 0)
 end
 
--- Auto Farm: fly in â†’ HOLD beside target (noclip without hold = fall through island) â†’ M1
+-- Auto Farm: fly in → HOLD beside target (noclip without hold = fall through island) → M1
 task.spawn(function()
     local lastFly = 0
     local lastPanel = 0
@@ -3934,9 +3966,9 @@ task.spawn(function()
                     if fdist > melee + 1.5 or math.abs(dy) > 6 then
                         if tick() - lastFly > 0.3 then
                             lastFly = tick()
-                            State.status = string.format("close Â· flat%.0f Â· dy%.0f", fdist, dy)
+                            State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
                             local ok, _, cache = bvFlyTo(stand, {
-                                speed = 950,
+                                speed = 700,
                                 arrive = math.max(2.5, melee * 0.35),
                                 keepNoclip = true,
                                 cancel = function()
@@ -3960,7 +3992,7 @@ task.spawn(function()
                             faceWorld(pos)
 
                             local now = tick()
-                            -- M1 only when beside them at similar height â€” on-top = 0 dmg
+                            -- M1 only when beside them at similar height — on-top = 0 dmg
                             local yOk = math.abs(hrp.Position.Y - pos.Y) <= 7
                             if State.farmM1 and fdist <= (melee + 1.5) and yOk and now - State.lastFarmM1 >= 0.09 then
                                 State.lastFarmM1 = now
@@ -3980,7 +4012,7 @@ task.spawn(function()
                             local fruit = currentFruitName() or "?"
                             local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
                             State.status = string.format(
-                                "%s Â· %s Â· %dhp Â· flat%.0f Â· %s",
+                                "%s · %s · %dhp · flat%.0f · %s",
                                 fruit,
                                 targetName,
                                 hp,
@@ -3996,7 +4028,7 @@ task.spawn(function()
                         lastFly = tick()
                         local stand, err, _, kind, dist0 = questKillStand(targetName)
                         if stand then
-                            State.status = string.format("goto Â· %s Â· %.0fd", tostring(kind or "pad"), dist0 or 0)
+                            State.status = string.format("goto · %s · %.0fd", tostring(kind or "pad"), dist0 or 0)
                             local ok, _, cache = bvFlyTo(farmStandPos(stand, targetName), {
                                 speed = 900,
                                 arrive = 10,
@@ -4007,13 +4039,13 @@ task.spawn(function()
                             })
                             if cache then _farmNoclipCache = cache end
                             if not ok then
-                                State.status = "travel fail Â· " .. tostring(targetName)
+                                State.status = "travel fail · " .. tostring(targetName)
                             end
                         else
                             State.status = "no " .. tostring(targetName)
                         end
                     else
-                        State.status = "seek Â· " .. tostring(targetName)
+                        State.status = "seek · " .. tostring(targetName)
                     end
                 end
             elseif not targetName then
@@ -4100,7 +4132,7 @@ local function revealUI()
     end
     refreshPanel()
     UI:PlayUI("open")
-    notify("T3ti", "Haze helper ready â€” RCtrl menu", "good")
+    notify("T3ti", "Haze helper ready — RCtrl menu", "good")
     print("[T3ti] Haze Seas helper loaded")
 end
 
