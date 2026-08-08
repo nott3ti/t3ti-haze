@@ -4197,7 +4197,7 @@ end
 do
     local tab = win:Tab("Farm")
     local s1 = tab:Section("Auto Farm")
-    s1:Label("BV fly + skill remotes (no 1st person)")
+    s1:Label("BV-noclip travel Â· fight without noclip Â· no island TP")
     s1:Toggle("Auto Farm", State.autoFarm, function(v)
         State.autoFarm = v
         savePersist()
