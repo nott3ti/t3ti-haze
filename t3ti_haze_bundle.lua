@@ -3200,26 +3200,47 @@ local function parseKillTarget(text)
     return m and cleanEnemyName(m) or nil
 end
 
+local function parseKillCount(text)
+    local t = tostring(text or "")
+    local n = t:match("[Kk]ill%s+(%d+)") or t:match("[Dd]efeat%s+(%d+)")
+    return n and tonumber(n) or nil
+end
+
 -- True only while a kill quest is IN PROGRESS (not empty, not already completed)
 local function hasActiveKillQuest()
     local prog, need = amountMobsProgress()
+    -- AmountMobs can be stale "0/0" while the objective label is still a real kill quest
     if need and need > 0 then
         return (prog or 0) < need
     end
+    local objText = mainFrameObjectiveText()
+    local fromLabel = parseKillTarget(objText)
+    local needFromObj = parseKillCount(objText)
+    if fromLabel and needFromObj and needFromObj > 0 then
+        -- 0/0 or missing AmountMobs â†’ still treat as active kill quest
+        return true
+    end
     local q = questValues()
-    if not q or not q.target then return false end
+    if not q or not q.target then
+        return fromLabel ~= nil
+    end
     local tneed = tonumber(q.target.Value) or 0
-    if tneed <= 0 then return false end
+    if tneed <= 0 then
+        return fromLabel ~= nil
+    end
     local tprog = q.progress and tonumber(q.progress.Value) or 0
     if tprog >= tneed then return false end
     local obj = q.objective and tostring(q.objective.Value) or ""
-    return obj ~= ""
+    return obj ~= "" or fromLabel ~= nil
 end
 
 -- Active incomplete kill quest NPC name only.
 local function currentQuestTarget()
+    -- Prefer visible objective even if AmountMobs is broken (0/0)
+    local fromLabel = parseKillTarget(mainFrameObjectiveText())
     if not hasActiveKillQuest() then
-        return nil
+        -- last chance: objective text alone
+        return fromLabel
     end
     -- 1) QuestHandler objective value
     local q = questValues()
@@ -3227,8 +3248,7 @@ local function currentQuestTarget()
         local fromObj = parseKillTarget(q.objective.Value)
         if fromObj then return fromObj end
     end
-    -- 2) MainFrame label (works even when values are blank)
-    local fromLabel = parseKillTarget(mainFrameObjectiveText())
+    -- 2) MainFrame label
     if fromLabel then return fromLabel end
     if QuestGui then
         for _, d in ipairs(QuestGui:GetDescendants()) do
@@ -3423,6 +3443,22 @@ local function questKillStand(targetName)
             local npcs = zone:FindFirstChild("NPCS") or zone:FindFirstChild("NPCs")
             if npcs then
                 for _, m in ipairs(npcs:GetChildren()) do
+                    considerModel(m)
+                end
+            else
+                for _, m in ipairs(zone:GetDescendants()) do
+                    if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
+                        considerModel(m)
+                    end
+                end
+            end
+        end
+    end
+    for _, rootName in ipairs({ "NPC_Workspace", "Npc_Workspace", "Enemies", "Bosses" }) do
+        local root = workspace:FindFirstChild(rootName)
+        if root then
+            for _, m in ipairs(root:GetDescendants()) do
+                if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
                     considerModel(m)
                 end
             end
@@ -3858,17 +3894,11 @@ local function farmTargetName()
     if State.farmMode == "Selected Enemy" then
         return State.farmEnemy
     end
+    -- Always prefer the quest on your GUI over "best for level" (avoids Vergo while on Bandits)
     local fromGui = currentQuestTarget()
+    if fromGui then return fromGui end
     local best = bestQuest()
     local bestTarget = best and cleanEnemyName(best.target)
-    -- GUI often shortens ("Revolutionarys") while folder is "Revolutionary Elite"
-    if fromGui and bestTarget then
-        local g, b = tostring(fromGui):lower(), tostring(bestTarget):lower()
-        if g == b or b:find(g, 1, true) or g:find(b, 1, true) then
-            return bestTarget
-        end
-    end
-    if fromGui then return fromGui end
     if bestTarget and not tostring(bestTarget):lower():find("level") then
         return bestTarget
     end
@@ -3894,6 +3924,26 @@ local function forEachZoneNpc(fn)
     end
 end
 
+-- Bosses sometimes live outside NPC Zones (SpecialBosses / streamed folders)
+local function forEachEnemyModel(fn)
+    forEachZoneNpc(fn)
+    local roots = {
+        workspace:FindFirstChild("NPC_Workspace"),
+        workspace:FindFirstChild("Npc_Workspace"),
+        workspace:FindFirstChild("Enemies"),
+        workspace:FindFirstChild("Bosses"),
+    }
+    for _, root in ipairs(roots) do
+        if root then
+            for _, m in ipairs(root:GetDescendants()) do
+                if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
+                    fn(m)
+                end
+            end
+        end
+    end
+end
+
 local function findNearestEnemyModel(targetName)
     targetName = targetName or farmTargetName()
     if not targetName then return nil end
@@ -3903,7 +3953,7 @@ local function findNearestEnemyModel(targetName)
     if not from then return nil end
 
     local best, bestDist, bestPos = nil, math.huge, nil
-    forEachZoneNpc(function(m)
+    forEachEnemyModel(function(m)
         if not m:IsA("Model") then return end
         if not npcNameMatches(m.Name, keys) then return end
         local hum = m:FindFirstChildOfClass("Humanoid")
