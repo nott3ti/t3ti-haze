@@ -1544,9 +1544,9 @@ local function bvFlyTo(goal, opts)
 end
 
 -- Keep floating at a FIXED combat stand (stiff — no orbit / chase)
--- mode "fight" = collisions on (in combat); "travel"/nil = noclip (between targets)
+-- Always keep noclip during farm holds — toggling it off mid-fight = server rubberband.
 local _lastNoclipRefresh = 0
-local function farmHoldAt(goal, lookAt, mode)
+local function farmHoldAt(goal, lookAt, _mode)
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -1566,20 +1566,11 @@ local function farmHoldAt(goal, lookAt, mode)
         goal = Vector3.new(goal.X, ceilY, goal.Z)
     end
 
-    local wantNoclip = mode ~= "fight"
-    if wantNoclip then
-        if tick() - _lastNoclipRefresh > 1.0 or not _farmNoclipCache then
-            _lastNoclipRefresh = tick()
-            _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
-        end
-        setFlyHumanoid(hum, true)
-    else
-        -- Fighting: drop noclip so travel tween is what uses it
-        if _farmNoclipCache then
-            setNoclip(char, false, _farmNoclipCache)
-        end
-        setFlyHumanoid(hum, true) -- still PlatformStand for hold float
+    if tick() - _lastNoclipRefresh > 1.0 or not _farmNoclipCache then
+        _lastNoclipRefresh = tick()
+        _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
     end
+    setFlyHumanoid(hum, true)
 
     local bv = hrp:FindFirstChild("T3tiFarmHold")
     if not bv then
@@ -2185,7 +2176,7 @@ end
 do
     local tab = win:Tab("Farm")
     local s1 = tab:Section("Auto Farm")
-    s1:Label("BV-noclip travel · fight without noclip · no island TP")
+    s1:Label("BV-noclip travel · stable quest hops · no island TP")
     s1:Toggle("Auto Farm", State.autoFarm, function(v)
         State.autoFarm = v
         savePersist()
@@ -2643,6 +2634,9 @@ local _lastCombatStand = nil -- stay here after a kill instead of pad-yo-yo
 local _lastCombatTarget = nil -- quest name that stand belongs to
 local _lastCombatAt = 0
 local _farmTrackedQuest = nil -- detect quest swaps
+local _farmIslandGoal = nil -- Vector3: commit to island hop (stops NPC↔island rubberband)
+local _farmIslandName = nil
+local _farmIslandUntil = 0 -- don't re-pick island goal every tick
 
 local function clearFarmLock()
     _farmLockNpc = nil
@@ -2654,6 +2648,9 @@ local function clearFarmArena()
     _lastCombatStand = nil
     _lastCombatTarget = nil
     _lastCombatAt = 0
+    _farmIslandGoal = nil
+    _farmIslandName = nil
+    _farmIslandUntil = 0
 end
 
 local function onFarmQuestChanged(targetName)
@@ -2663,6 +2660,13 @@ local function onFarmQuestChanged(targetName)
     _farmTrackedQuest = key
     clearFarmArena()
     requestFarmRepath()
+    -- Lock travel to the new quest island until we arrive / find a near NPC
+    local stand, spawn = questIslandStand(questOptForTarget(key), key)
+    if stand then
+        _farmIslandGoal = stand
+        _farmIslandName = spawn
+        _farmIslandUntil = tick() + 45
+    end
     State.status = "quest swap · " .. key
     return true
 end
@@ -2723,12 +2727,32 @@ task.spawn(function()
                 local targetName = farmTargetName()
                 local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
                 if targetName and hrp then
-                    -- New quest (e.g. Thunder God → Revolutionary): leave old arena
+                    -- New quest: clear old arena + lock island hop
                     if onFarmQuestChanged(targetName) then
                         lastFly = 0
                     end
 
                     local npc, pos, dist = resolveFarmTarget(targetName, hrp)
+
+                    -- While island-hopping, ignore far NPCs (island↔NPC rubberband)
+                    local islandHopping = _farmIslandGoal
+                        and tick() < _farmIslandUntil
+                        and typeof(_farmIslandGoal) == "Vector3"
+                    if islandHopping then
+                        local nearIsland = (hrp.Position - _farmIslandGoal).Magnitude < 80
+                        if nearIsland then
+                            _farmIslandGoal = nil
+                            _farmIslandName = nil
+                            islandHopping = false
+                        elseif npc and dist and dist < 100 then
+                            _farmIslandGoal = nil
+                            _farmIslandName = nil
+                            islandHopping = false
+                        else
+                            npc, pos, dist = nil, nil, nil
+                        end
+                    end
+
                     if npc and pos then
                         local stand = farmStandPos(pos, npc, hrp.Position)
                         _lastCombatStand = stand
@@ -2743,17 +2767,17 @@ task.spawn(function()
                         local closeFight = (dist or 99) < 55 and math.abs(dy) < 22
                         local needFly = (not closeFight) and (
                             _forceFarmRepath
-                            or standDist > 22
-                            or fdist > (melee + 12)
-                            or math.abs(dy) > 16
+                            or standDist > 35
+                            or fdist > (melee + 18)
+                            or math.abs(dy) > 22
                         )
-                        if needFly and tick() - lastFly > 1.0 then
+                        if needFly and tick() - lastFly > 1.4 then
                             lastFly = tick()
                             _forceFarmRepath = false
                             State.status = string.format("close · flat%.0f · dy%.0f", fdist, dy)
                             local ok, _, cache = bvFlyTo(stand, {
                                 speed = 650,
-                                arrive = math.max(4, melee * 0.5),
+                                arrive = math.max(6, melee * 0.6),
                                 keepNoclip = true,
                                 cancel = function()
                                     return not State.autoFarm or not UI.alive or inCutscene()
@@ -2811,45 +2835,77 @@ task.spawn(function()
                         end
                     else
                         clearFarmLock()
-                        -- Boss dead / waiting respawn: HOLD last fight spot ONLY for SAME quest.
-                        -- Different quest must travel to new pads (no "last" from Thunder God).
                         clearVirtualAim()
-                        local waitStand, err, _, kind, dist0 = questKillStand(targetName)
-                        local perch, perchKind = waitStand, kind
-                        local sameQuestLast = _lastCombatStand
-                            and _lastCombatTarget == targetName
-                            and (tick() - _lastCombatAt) < 60
-                        if sameQuestLast then
-                            if (not waitStand)
-                                or flatDist(_lastCombatStand, waitStand) < 55
-                                or math.abs(_lastCombatStand.Y - (waitStand and waitStand.Y or _lastCombatStand.Y)) < 35
-                            then
-                                perch = _lastCombatStand
-                                perchKind = "last"
+
+                        local perch, perchKind, dist0 = nil, nil, nil
+                        if islandHopping and _farmIslandGoal then
+                            perch = _farmIslandGoal
+                            perchKind = "island:" .. tostring(_farmIslandName or "?")
+                            dist0 = (hrp.Position - perch).Magnitude
+                        else
+                            local waitStand, _, _, kind, d0 = questKillStand(targetName)
+                            perch, perchKind, dist0 = waitStand, kind, d0
+                            local sameQuestLast = _lastCombatStand
+                                and _lastCombatTarget == targetName
+                                and (tick() - _lastCombatAt) < 60
+                            -- Prefer last stand ONLY when pad is nearby (AND on Y, not OR)
+                            if sameQuestLast then
+                                if (not waitStand)
+                                    or (
+                                        flatDist(_lastCombatStand, waitStand) < 55
+                                        and math.abs(_lastCombatStand.Y - waitStand.Y) < 35
+                                    )
+                                then
+                                    perch = _lastCombatStand
+                                    perchKind = "last"
+                                end
+                            end
+                            if not perch then
+                                local islandStand, spawnName = questIslandStand(
+                                    questOptForTarget(targetName),
+                                    targetName
+                                )
+                                if islandStand then
+                                    perch = islandStand
+                                    perchKind = "island:" .. tostring(spawnName or "?")
+                                    dist0 = (hrp.Position - islandStand).Magnitude
+                                    _farmIslandGoal = islandStand
+                                    _farmIslandName = spawnName
+                                    _farmIslandUntil = tick() + 45
+                                end
                             end
                         end
+
                         if perch then
                             local wf = flatDist(hrp.Position, perch)
                             local dy = hrp.Position.Y - perch.Y
-                            local far = wf > 40 or math.abs(dy) > 35 or _forceFarmRepath
-                            if far and tick() - lastFly > 1.0 then
+                            local dist3 = (hrp.Position - perch).Magnitude
+                            local far = dist3 > 28 or wf > 40 or math.abs(dy) > 35 or _forceFarmRepath
+                            if far and tick() - lastFly > 1.4 then
                                 lastFly = tick()
                                 _forceFarmRepath = false
+                                local spd = dist3 > 2500 and 950 or (dist3 > 1200 and 850 or 700)
                                 State.status = string.format(
-                                    "goto · %s · %.0fd",
+                                    "fly · %s · %.0fd",
                                     tostring(perchKind or "pad"),
-                                    dist0 or wf
+                                    dist0 or dist3
                                 )
                                 local ok, _, cache = bvFlyTo(perch, {
-                                    speed = 650,
-                                    arrive = 14,
+                                    speed = spd,
+                                    arrive = 20,
                                     keepNoclip = true,
+                                    maxT = math.clamp(dist3 / math.max(200, spd) + 15, 20, 120),
                                     cancel = function()
                                         return not State.autoFarm or not UI.alive
                                     end,
                                 })
                                 if cache then _farmNoclipCache = cache end
-                                if not ok then
+                                if ok then
+                                    if _farmIslandGoal and (hrp.Position - _farmIslandGoal).Magnitude < 100 then
+                                        _farmIslandGoal = nil
+                                        _farmIslandName = nil
+                                    end
+                                else
                                     State.status = "travel fail · " .. tostring(targetName)
                                 end
                             else
@@ -2862,48 +2918,8 @@ task.spawn(function()
                                 )
                             end
                         else
-                            -- No pad/NPC streamed: BV-noclip tween to quest island (never teleport)
-                            local islandStand, spawnName = questIslandStand(
-                                questOptForTarget(targetName),
-                                targetName
-                            )
-                            if islandStand then
-                                local distIsland = (hrp.Position - islandStand).Magnitude
-                                if tick() - lastFly > 1.2 then
-                                    lastFly = tick()
-                                    _forceFarmRepath = false
-                                    local spd = distIsland > 2500 and 950 or (distIsland > 1200 and 850 or 750)
-                                    State.status = string.format(
-                                        "fly · %s · %.0fd",
-                                        tostring(spawnName or targetName),
-                                        distIsland
-                                    )
-                                    local ok, _, cache = bvFlyTo(islandStand, {
-                                        speed = spd,
-                                        arrive = 18,
-                                        keepNoclip = true,
-                                        maxT = math.clamp(distIsland / math.max(200, spd) + 15, 20, 120),
-                                        cancel = function()
-                                            return not State.autoFarm or not UI.alive
-                                        end,
-                                    })
-                                    if cache then _farmNoclipCache = cache end
-                                    if not ok then
-                                        State.status = "island fail · " .. tostring(spawnName)
-                                    else
-                                        requestFarmRepath()
-                                    end
-                                else
-                                    State.status = string.format(
-                                        "seek · %s · %.0fd",
-                                        tostring(spawnName or targetName),
-                                        distIsland
-                                    )
-                                end
-                            else
-                                stopFarmHold()
-                                State.status = "no pad · " .. tostring(targetName)
-                            end
+                            stopFarmHold()
+                            State.status = "no pad · " .. tostring(targetName)
                         end
                     end
                 elseif not targetName then
