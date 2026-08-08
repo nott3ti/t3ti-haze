@@ -1021,38 +1021,30 @@ end
 -- True only while a kill quest is IN PROGRESS (not empty, not already completed)
 local function hasActiveKillQuest()
     local prog, need = amountMobsProgress()
-    -- AmountMobs can be stale "0/0" while the objective label is still a real kill quest
-    if need and need > 0 then
-        return (prog or 0) < need
+    -- Explicit AmountMobs: "0/0" means no quest (objective text often stays stale)
+    if need ~= nil then
+        return need > 0 and (prog or 0) < need
+    end
+    -- AmountMobs missing/unreadable — use QuestHandler, then objective label
+    local q = questValues()
+    if q and q.target then
+        local tneed = tonumber(q.target.Value) or 0
+        if tneed > 0 then
+            local tprog = q.progress and tonumber(q.progress.Value) or 0
+            return tprog < tneed
+        end
+        return false
     end
     local objText = mainFrameObjectiveText()
     local fromLabel = parseKillTarget(objText)
     local needFromObj = parseKillCount(objText)
-    if fromLabel and needFromObj and needFromObj > 0 then
-        -- 0/0 or missing AmountMobs → still treat as active kill quest
-        return true
-    end
-    local q = questValues()
-    if not q or not q.target then
-        return fromLabel ~= nil
-    end
-    local tneed = tonumber(q.target.Value) or 0
-    if tneed <= 0 then
-        return fromLabel ~= nil
-    end
-    local tprog = q.progress and tonumber(q.progress.Value) or 0
-    if tprog >= tneed then return false end
-    local obj = q.objective and tostring(q.objective.Value) or ""
-    return obj ~= "" or fromLabel ~= nil
+    return fromLabel ~= nil and needFromObj ~= nil and needFromObj > 0
 end
 
 -- Active incomplete kill quest NPC name only.
 local function currentQuestTarget()
-    -- Prefer visible objective even if AmountMobs is broken (0/0)
-    local fromLabel = parseKillTarget(mainFrameObjectiveText())
     if not hasActiveKillQuest() then
-        -- last chance: objective text alone
-        return fromLabel
+        return nil
     end
     -- 1) QuestHandler objective value
     local q = questValues()
@@ -1061,6 +1053,7 @@ local function currentQuestTarget()
         if fromObj then return fromObj end
     end
     -- 2) MainFrame label
+    local fromLabel = parseKillTarget(mainFrameObjectiveText())
     if fromLabel then return fromLabel end
     if QuestGui then
         for _, d in ipairs(QuestGui:GetDescendants()) do
