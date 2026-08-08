@@ -5,12 +5,14 @@ T3ti UI + Haze Seas helper (quests, travel, stats, intro).
 ## Load (executor)
 
 ```lua
-local url = "https://raw.githubusercontent.com/nott3ti/t3ti-haze/main/t3ti_haze_bundle.lua"
+local url = "https://cdn.jsdelivr.net/gh/nott3ti/t3ti-haze@main/t3ti_haze_bundle.lua"
 local src = game:HttpGet(url)
 local fn, err = (loadstring or load)(src)
 assert(fn, err)
 fn()
 ```
+
+If it errors, the `assert` message shows the real compile/HttpGet failure (not a blank nil call).
 
 ## Controls
 - **RCtrl** — toggle menu

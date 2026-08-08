@@ -1,4 +1,4 @@
-﻿local url = "https://raw.githubusercontent.com/nott3ti/t3ti-haze/main/t3ti_haze_bundle.lua"
+﻿local url = "https://cdn.jsdelivr.net/gh/nott3ti/t3ti-haze@main/t3ti_haze_bundle.lua"
 local okGet, src = pcall(function()
     return game:HttpGet(url)
 end)
