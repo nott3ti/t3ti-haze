@@ -5,11 +5,15 @@ T3ti UI + Haze Seas helper (quests, travel, stats, intro).
 ## Load (executor)
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/nott3ti/t3ti-haze/main/t3ti_haze_bundle.lua"))()
+local url = "https://raw.githubusercontent.com/nott3ti/t3ti-haze/main/t3ti_haze_bundle.lua"
+local src = game:HttpGet(url)
+local fn, err = (loadstring or load)(src)
+assert(fn, err)
+fn()
 ```
 
 ## Controls
-- **RCtrl** — toggle menu
+- **RCtrl** â€” toggle menu
 - Intro plays once on launch (~7s delay, ends ~12s)
 
 ## Requirements
@@ -17,6 +21,6 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/nott3ti/t3ti-haze/mai
 - For intro audio: `writefile` + `getcustomasset` (wav is in `t3ti-intro/`)
 
 ## Files
-- `t3ti_haze_bundle.lua` — all-in-one
-- `t3ti_ui.lua` / `haze_seas_helper.lua` — split sources
-- `t3ti-intro/untitled.wav` — intro jingle
+- `t3ti_haze_bundle.lua` â€” all-in-one
+- `t3ti_ui.lua` / `haze_seas_helper.lua` â€” split sources
+- `t3ti-intro/untitled.wav` â€” intro jingle

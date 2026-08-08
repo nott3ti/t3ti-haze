@@ -1,4 +1,4 @@
--- t3ti_haze_bundle (IIFE-split: avoids >200 main-chunk locals)
+-- t3ti_haze_bundle (IIFE-split + lua51 assigns)
 (function()
 --[[
     T3ti UI â€” Drawing API menu framework
@@ -3329,9 +3329,9 @@ local function padCenter(pads)
     if not pads or #pads == 0 then return nil end
     local cx, cy, cz = 0, 0, 0
     for _, p in ipairs(pads) do
-        cx += p.pos.X
-        cy += p.pos.Y
-        cz += p.pos.Z
+        cx = cx + p.pos.X
+        cy = cy + p.pos.Y
+        cz = cz + p.pos.Z
     end
     return Vector3.new(cx / #pads, cy / #pads, cz / #pads)
 end
@@ -3408,7 +3408,7 @@ local function questKillStand(targetName)
         if hum and hum.Health <= 0 then return end
         local ok, piv = pcall(function() return m:GetPivot().Position end)
         if not ok or not piv then return end
-        count += 1
+        count = count + 1
         local d = (piv - from).Magnitude
         if d < nearestDist then
             nearestDist = d
@@ -3575,7 +3575,7 @@ local function bvFlyTo(goal, opts)
         return false, "no character/goal"
     end
 
-    _questFlyToken += 1
+    _questFlyToken = _questFlyToken + 1
     local token = _questFlyToken
     local speed = opts.speed or 700
     local arrive = opts.arrive or 12
@@ -3639,7 +3639,7 @@ local function bvFlyTo(goal, opts)
 
     while token == _questFlyToken and hrp.Parent and UI.alive and (tick() - t0) < maxT do
         if opts.cancel and opts.cancel() then break end
-        tickN += 1
+        tickN = tickN + 1
         if tickN % 2 == 0 then
             setNoclip(char, true, collCache)
             setFlyHumanoid(hum, true)
@@ -3657,7 +3657,7 @@ local function bvFlyTo(goal, opts)
 
         local moved = (pos - lastPos).Magnitude
         if dist > arrive + 4 and moved < 0.4 then
-            stuckFor += 1
+            stuckFor = stuckFor + 1
         else
             stuckFor = math.max(0, stuckFor - 2)
         end
@@ -4069,7 +4069,7 @@ end
 
 -- Full release when farm turns off (movers + aim + camera + fly cancel)
 local function releaseFarmControl()
-    _questFlyToken += 1
+    _questFlyToken = _questFlyToken + 1
     stopFarmHold()
     clearVirtualAim()
     local char = LP.Character
@@ -5097,7 +5097,7 @@ task.spawn(function()
                                     State.status = "travel fail Â· " .. tostring(targetName)
                                 end
                             else
-                                _questFlyToken += 1
+                                _questFlyToken = _questFlyToken + 1
                                 farmHoldAt(perch, perch, "travel")
                                 State.status = string.format(
                                     "wait Â· %s Â· %s",
