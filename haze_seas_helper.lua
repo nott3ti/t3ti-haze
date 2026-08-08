@@ -6,7 +6,8 @@
       - Quest: best available, accept anywhere, auto-accept, warp to island then accept
       - Travel: SetSpawnPoint + TeleportToHome
       - Stats: dump free points into Fruit
-      - Skills: fire Tremor fruit remotes / SkillUsed
+      - Skills: any fruit remotes / SkillUsed (cinematic moves skipped by default)
+      - Farm: any fruit / fighting style M1 tool
       - Panels: quest status, player info, stat points
 ]]
 
@@ -107,25 +108,28 @@ local function charHakiFlags(char)
 end
 
 -- Settings can lie (HakiObs stored as K while game uses R). Try several keys until flag is ON.
+-- Non-blocking: own thread so farm/camera never stall on key waits.
 local function pressUntilFlag(getFlag, keyCodes)
-    for _, kc in ipairs(keyCodes) do
-        if kc then
-            pressAbilityKey(kc)
-            task.wait(0.2)
-            local flags = charHakiFlags()
-            if flags and getFlag(flags) == true then
-                return true
+    task.spawn(function()
+        for _, kc in ipairs(keyCodes) do
+            if not UI.alive then return end
+            if kc then
+                pressAbilityKey(kc)
+                task.wait(0.22)
+                local flags = charHakiFlags()
+                if flags and getFlag(flags) == true then
+                    return
+                end
             end
         end
-    end
-    return false
+    end)
 end
 
 local State = {
     autoAccept = true, -- keep best quest for your level accepted
     autoFruit = false,
     autoSkill = false,
-    skillName = "Ground Flicker",
+    skillName = "Auto",
     skillCd = 3,
     lastSkill = 0,
     lastAccept = 0,
@@ -149,6 +153,7 @@ local State = {
     farmHeight = 1.5,
     skillEnabled = {},
     m1Tool = "Auto",
+    farmAllowCutscene = false, -- cinematic skills stay off unless toggled in Specify
     -- Auto Haki / Buso (Obs is R in-game; settings may still say K)
     autoBuso = true,
     autoHaki = true, -- Observation Haki
@@ -184,40 +189,41 @@ local function savePersist()
 end
 
 -- MUST be after State (Luau treats earlier refs as a different nil global)
+local _hakiBusyUntil = 0
 local function ensureAutoHaki(force)
     if not (State.autoBuso or State.autoHaki) then return false end
-    if not force and tick() - (State.lastHakiToggle or 0) < 0.45 then
+    if tick() < _hakiBusyUntil then return false end
+    if not force and tick() - (State.lastHakiToggle or 0) < 0.9 then
         return false
     end
     local flags = charHakiFlags()
     if not flags then return false end
 
-    local pressed = false
-    -- Buso (Armament) — keep ON
-    if State.autoBuso and flags.buso and flags.buso.Value ~= true then
-        State.lastHakiToggle = tick()
+    local needBuso = State.autoBuso and flags.buso and flags.buso.Value ~= true
+    local needObs = State.autoHaki and flags.obs and flags.obs.Value ~= true
+    if not (needBuso or needObs) then return false end
+
+    State.lastHakiToggle = tick()
+    _hakiBusyUntil = tick() + 1.2
+
+    -- Only one ability per pass; presses run async (no farm-loop stall)
+    if needBuso then
         pressUntilFlag(function(f)
             return f.buso and f.buso.Value
         end, {
             readAbilityKey("HakiBuso", "J"),
             Enum.KeyCode.J,
         })
-        pressed = true
-        flags = charHakiFlags() or flags
-    end
-    -- Observation Haki — keep ON (in-game bind is R; settings often still say K)
-    if State.autoHaki and flags.obs and flags.obs.Value ~= true then
-        State.lastHakiToggle = tick()
+    elseif needObs then
         pressUntilFlag(function(f)
             return f.obs and f.obs.Value
         end, {
-            Enum.KeyCode.R, -- actual bind
+            Enum.KeyCode.R,
             readAbilityKey("HakiObs", "R"),
-            Enum.KeyCode.K, -- legacy settings default
+            Enum.KeyCode.K,
         })
-        pressed = true
     end
-    return pressed
+    return true
 end
 
 -- Always-on keeper (not tied to farm). Re-enables after death / knockoff.
@@ -404,8 +410,48 @@ local function spawnSetterPosition(spawnName)
     local folder = root and root:FindFirstChild("Spawn Setters")
     local m = folder and folder:FindFirstChild(spawnName)
     if not m then return nil end
+    -- Most islands are empty Models with only a pivot (no BaseParts streamed)
     local part = m:FindFirstChildWhichIsA("BasePart", true)
-    return part and part.Position or nil
+    if part then return part.Position end
+    local ok, piv = pcall(function()
+        return m:GetPivot().Position
+    end)
+    if ok and typeof(piv) == "Vector3" then
+        return piv
+    end
+    return nil
+end
+
+-- Guess spawn island from enemy name when quest option lookup fails
+local function spawnForEnemyName(targetName)
+    local n = tostring(targetName or ""):lower()
+    local hints = {
+        { "impel", "Impel Jail" },
+        { "revolution", "Revolutionary Base" },
+        { "holy", "Skypiean islands" },
+        { "divine", "Skypiean islands" },
+        { "thunder", "Skypiean islands" },
+        { "skyp", "Skypiean islands" },
+        { "fishman", "Fishman Island" },
+        { "shark", "Shark Park" },
+        { "clown", "Clown Island" },
+        { "desert", "Desert Ruins" },
+        { "marine hq", "Marine HQ" },
+        { "marine", "Marine Base Town" },
+        { "logue", "Logue City" },
+        { "tall wood", "Tall Woods" },
+        { "skull", "Skull Island" },
+        { "thriller", "Thriller Boat" },
+        { "bubble", "Bubble Island" },
+        { "restaurant", "Sea Restaurant" },
+        { "starter", "Starter Island" },
+    }
+    for _, h in ipairs(hints) do
+        if n:find(h[1], 1, true) then
+            return matchSpawn(h[2]) or h[2]
+        end
+    end
+    return nil
 end
 
 local function warpTo(spawnName)
@@ -463,13 +509,43 @@ end
 local function fruitFolder()
     local fp = PG:FindFirstChild("FruitPowers")
     if not fp then return nil end
-    -- whatever fruit folder is currently loaded (= equipped fruit)
+    -- Prefer the equipped fruit name from PlayerData (any fruit)
+    local want = nil
+    pcall(function()
+        local v = PD:FindFirstChild("CurrentSuperPower") or PD:FindFirstChild("Fruit") or PD:FindFirstChild("DevilFruit")
+        if v and v:IsA("ValueBase") and tostring(v.Value) ~= "" then
+            want = tostring(v.Value)
+        end
+    end)
+    if want then
+        local exact = fp:FindFirstChild(want)
+        if exact then return exact end
+        for _, c in ipairs(fp:GetChildren()) do
+            if c.Name:lower() == want:lower() then return c end
+        end
+    end
+    -- Fallback: folder matching equipped tool name
+    local char = LP.Character
+    if char then
+        local held = char:FindFirstChildOfClass("Tool")
+        if held and fp:FindFirstChild(held.Name) then
+            return fp:FindFirstChild(held.Name)
+        end
+    end
     return fp:GetChildren()[1]
 end
 
 local function currentFruitName()
     local f = fruitFolder()
     return f and f.Name or nil
+end
+
+local function currentFightingStyle()
+    local ok, v = pcall(function()
+        local s = PD:FindFirstChild("FightingStyle")
+        return s and tostring(s.Value) or nil
+    end)
+    return (ok and v and v ~= "" and v ~= "nil") and v or nil
 end
 
 -- Combat / fruit / sword tools in Character + Backpack
@@ -498,7 +574,7 @@ local function findToolByName(name)
         or (bp and bp:FindFirstChild(name))
 end
 
--- M1 tool: Auto → tool named like current fruit, else held tool, else Combat
+-- M1 tool: Auto → fruit tool → fighting style tool → held → Combat/Katana
 local function resolveM1Tool()
     local char = LP.Character
     local pick = State.m1Tool
@@ -511,11 +587,22 @@ local function resolveM1Tool()
         local t = findToolByName(fruit)
         if t then return t end
     end
+    local style = currentFightingStyle()
+    if style then
+        local t = findToolByName(style)
+        if t then return t end
+    end
     if char then
         local held = char:FindFirstChildOfClass("Tool")
         if held then return held end
     end
-    return findToolByName("Combat") or findToolByName("Katana")
+    for _, n in ipairs({ "Combat", "Katana", "Sword" }) do
+        local t = findToolByName(n)
+        if t then return t end
+    end
+    -- last resort: any Tool in backpack/character
+    local names = inventoryToolNames()
+    return names[1] and findToolByName(names[1]) or nil
 end
 
 local function ensureM1ToolEquipped()
@@ -571,15 +658,37 @@ local function equippedSkillNames()
     return names
 end
 
+--[[
+  Skills that take the camera (cutscenes / cinematic cast).
+  Works for ANY fruit — name heuristics + learned at runtime.
+  Default OFF in farm inventory so they don't break camera mid-farm.
+]]
+-- Conservative name hints — runtime learning covers the rest per fruit
+local CUTSCENE_SKILL_HINTS = {
+    "rift", "cutscene", "cinematic", "domain", "awakening",
+    "transformation", "meteor", "nuke",
+}
+local _cutsceneSkillLearned = {} -- [skillName]=true after we see camera takeover
+
+local function skillLooksCinematic(name)
+    local n = tostring(name or ""):lower()
+    if _cutsceneSkillLearned[name] then return true end
+    for _, h in ipairs(CUTSCENE_SKILL_HINTS) do
+        if n:find(h, 1, true) then return true end
+    end
+    return false
+end
+
 local function ensureSkillDefaults()
     for _, n in ipairs(equippedSkillNames()) do
         if State.skillEnabled[n] == nil then
-            State.skillEnabled[n] = true
+            -- Cinematic moves default OFF for farm stability (user can tick them on)
+            State.skillEnabled[n] = not skillLooksCinematic(n)
         end
     end
 end
 
--- Skills ticked in Specify (new skills default ON)
+-- Skills ticked in Specify (new skills default ON unless cinematic)
 local function selectedSkillNames()
     ensureSkillDefaults()
     local out = {}
@@ -593,6 +702,11 @@ end
 
 local function castSkill(name)
     name = name or State.skillName
+    if name == "Auto" or name == "" or name == nil then
+        local picks = selectedSkillNames()
+        name = picks[1]
+    end
+    if not name then return false, "no skill" end
     local fruit = fruitFolder()
     local ev = fruit and fruit:FindFirstChild("Events")
     local remote = ev and ev:FindFirstChild(name)
@@ -615,13 +729,13 @@ local function castSkill(name)
         if ok and SkillUsed then
             pcall(function() SkillUsed:FireServer(name) end)
         end
-        return ok, err
+        return ok, err, name
     end
     if SkillUsed then
         local ok, err = pcall(function() SkillUsed:FireServer(name) end)
-        return ok, err
+        return ok, err, name
     end
-    return false, "skill remote missing"
+    return false, "skill remote missing", name
 end
 
 -- In-game M1 via fruit/weapon tool Activate — no OS click, mouse stays free
@@ -680,13 +794,15 @@ local function questOptForTarget(targetName)
     return hit or bestQuest()
 end
 
-local function questIslandStand(opt)
+local function questIslandStand(opt, targetName)
     opt = opt or bestQuest()
-    if not opt then return nil, "no quest" end
-    local spawn = matchSpawn(opt.location)
+    local spawn = opt and matchSpawn(opt.location)
+    if not spawn then
+        spawn = spawnForEnemyName(targetName or (opt and opt.target))
+    end
     local pos = spawn and spawnSetterPosition(spawn)
     if not pos then
-        return nil, "no spawn part for " .. tostring(opt.location)
+        return nil, "no spawn part for " .. tostring(spawn or (opt and opt.location) or targetName)
     end
     return pos + Vector3.new(0, 6, 0), spawn, opt
 end
@@ -783,17 +899,19 @@ end
 
 local function disableGameAutoQuest()
     if not ToggleAutoQuest then return end
-    for _ = 1, 3 do
-        if not gameAutoQuestEnabled() then return end
+    if gameAutoQuestEnabled() then
         pcall(function()
             ToggleAutoQuest:FireServer()
         end)
-        task.wait(0.15)
     end
 end
 
+local _lastDisableAutoQuest = 0
 local function ensureBestQuest()
-    disableGameAutoQuest()
+    if tick() - _lastDisableAutoQuest > 8 then
+        _lastDisableAutoQuest = tick()
+        task.spawn(disableGameAutoQuest)
+    end
     local best = bestQuest()
     if not best then
         local active = currentQuestTarget()
@@ -1022,14 +1140,71 @@ local function setFlyHumanoid(hum, on)
     if not hum then return end
     pcall(function()
         if on then
+            -- PlatformStand only — avoid Physics state (breaks camera subject)
             hum.PlatformStand = true
             hum.AutoRotate = false
-            hum:ChangeState(Enum.HumanoidStateType.Physics)
         else
             hum.PlatformStand = false
             hum.AutoRotate = true
-            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            pcall(function()
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+            end)
         end
+    end)
+end
+
+-- Haze uses Track/Custom for normal play; only Scriptable = cinematic (Sea Rift V, etc.)
+local function inCutscene()
+    local ok, yes = pcall(function()
+        local cam = workspace.CurrentCamera
+        return cam and cam.CameraType == Enum.CameraType.Scriptable
+    end)
+    return ok and yes == true
+end
+
+-- Kill leftover Sea Rift / cutscene CameraRig clones that Heartbeat-lock the camera
+local function destroyCutsceneRigs()
+    pcall(function()
+        local ignore = workspace:FindFirstChild("Ignore")
+        if not ignore then return end
+        for _, c in ipairs(ignore:GetChildren()) do
+            local n = c.Name:lower()
+            if c:FindFirstChild("Camera")
+                or n:find("camera", 1, true)
+                or n:find("rift", 1, true)
+                or n:find("cutscene", 1, true)
+            then
+                pcall(function() c:Destroy() end)
+            end
+        end
+    end)
+end
+
+local function restoreCamera()
+    pcall(function()
+        destroyCutsceneRigs()
+        local cam = workspace.CurrentCamera
+        local char = LP.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            hrp.Anchored = false
+        end
+        if hum then
+            hum.PlatformStand = false
+            hum.AutoRotate = true
+        end
+        if cam then
+            -- Exit Scriptable lock; Track is this game's normal mode
+            if cam.CameraType == Enum.CameraType.Scriptable then
+                cam.CameraType = Enum.CameraType.Custom
+            end
+            if hum then
+                cam.CameraSubject = hum
+            end
+        end
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
     end)
 end
 
@@ -1085,11 +1260,12 @@ local function bvFlyTo(goal, opts)
     bv.Velocity = Vector3.zero
     bv.Parent = hrp
 
+    -- Yaw-only gyro — full MaxTorque tilts the body and breaks camera
     local bg = Instance.new("BodyGyro")
     bg.Name = "T3tiQuestGyro"
-    bg.MaxTorque = Vector3.new(1, 1, 1) * 4e10
-    bg.P = 20000
-    bg.D = 800
+    bg.MaxTorque = Vector3.new(0, 4e10, 0)
+    bg.P = 12000
+    bg.D = 600
     bg.CFrame = hrp.CFrame
     bg.Parent = hrp
 
@@ -1197,6 +1373,7 @@ local function bvFlyTo(goal, opts)
 end
 
 -- Keep floating at a FIXED combat stand (stiff — no orbit / chase)
+local _lastNoclipRefresh = 0
 local function farmHoldAt(goal, lookAt)
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -1217,7 +1394,11 @@ local function farmHoldAt(goal, lookAt)
         goal = Vector3.new(goal.X, ceilY, goal.Z)
     end
 
-    _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
+    -- Refresh noclip infrequently (full GetDescendants every frame freezes)
+    if tick() - _lastNoclipRefresh > 1.0 or not _farmNoclipCache then
+        _lastNoclipRefresh = tick()
+        _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
+    end
     setFlyHumanoid(hum, true)
 
     local bv = hrp:FindFirstChild("T3tiFarmHold")
@@ -1232,27 +1413,23 @@ local function farmHoldAt(goal, lookAt)
     if not bg then
         bg = Instance.new("BodyGyro")
         bg.Name = "T3tiFarmGyro"
-        bg.MaxTorque = Vector3.new(1, 1, 1) * 4e10
-        bg.P = 30000
-        bg.D = 900
+        -- yaw only — full torque + CFrame snaps = camera break / hitch
+        bg.MaxTorque = Vector3.new(0, 4e10, 0)
+        bg.P = 12000
+        bg.D = 600
         bg.Parent = hrp
     end
 
     local delta = goal - hrp.Position
     local dist = delta.Magnitude
     if dist < 1.5 then
-        -- stay still — do NOT CFrame-snap every frame (fights server → freeze)
         bv.Velocity = Vector3.zero
         pcall(function()
             hrp.AssemblyLinearVelocity = Vector3.zero
         end)
     elseif dist < 8 then
-        -- soft correct — no flinging
         local spd = math.clamp(dist * 12, 24, 110)
         bv.Velocity = delta.Unit * spd
-        pcall(function()
-            hrp.AssemblyLinearVelocity = delta.Unit * spd
-        end)
     elseif hrp.Position.Y > goal.Y + 14 then
         local spd = math.clamp(dist * 22, 120, 550)
         bv.Velocity = delta.Unit * spd
@@ -1419,11 +1596,14 @@ local function setVirtualAim(pos, targetInst)
     Aim.on = true
     State.aimPos = pos
     State.aimHit = Aim.hit
-    -- Some games also listen for a mouse-pos remote
+    -- Throttle mouse remote — spam freezes / desyncs camera scripts
     if UpdateMousePosition and UpdateMousePosition:IsA("RemoteEvent") then
-        pcall(function()
-            UpdateMousePosition:FireServer(pos)
-        end)
+        if tick() - (Aim._lastRemote or 0) > 0.2 then
+            Aim._lastRemote = tick()
+            pcall(function()
+                UpdateMousePosition:FireServer(pos)
+            end)
+        end
     end
     return true
 end
@@ -1480,14 +1660,25 @@ end
 
 pcall(installVirtualMouse)
 
--- Face character at target without touching the OS mouse / camera look.
+-- Face via yaw only through BodyGyro when farming — never CFrame-snap HRP (camera break).
+local _lastFaceAt = 0
 local function faceWorld(pos)
+    if tick() - _lastFaceAt < 0.15 then return end
+    _lastFaceAt = tick()
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
     if not hrp or typeof(pos) ~= "Vector3" then return end
     local flat = Vector3.new(pos.X, hrp.Position.Y, pos.Z)
     if (flat - hrp.Position).Magnitude < 0.05 then return end
+    -- Prefer farm gyro if present
+    local bg = hrp:FindFirstChild("T3tiFarmGyro") or hrp:FindFirstChild("T3tiQuestGyro")
+    if bg and bg:IsA("BodyGyro") then
+        bg.CFrame = CFrame.lookAt(hrp.Position, flat)
+        return
+    end
+    -- Travel / idle: soft yaw without overwriting full CFrame every frame
     pcall(function()
-        hrp.CFrame = CFrame.lookAt(hrp.Position, flat)
+        local look = CFrame.lookAt(hrp.Position, flat)
+        hrp.CFrame = CFrame.new(hrp.Position) * (look - look.Position)
     end)
 end
 
@@ -1507,23 +1698,6 @@ local function farmClick()
     return false
 end
 
-local function castFarmSkills(aimPos, aimTarget)
-    if aimPos then
-        setVirtualAim(aimPos, aimTarget)
-        faceWorld(aimPos)
-    end
-    -- make sure fruit/weapon tool is out so skill remotes register
-    ensureM1ToolEquipped()
-    local picks = selectedSkillNames()
-    if #picks == 0 then
-        return
-    end
-    for _, n in ipairs(picks) do
-        castSkill(n)
-        task.wait(0.08)
-    end
-end
-
 local function stopFarmNoclip()
     stopFarmHold()
     local char = LP.Character
@@ -1531,10 +1705,127 @@ local function stopFarmNoclip()
         setNoclip(char, false, _farmNoclipCache)
     end
     _farmNoclipCache = nil
+    restoreCamera()
 end
 
--- Tween to safe perch, aim mouse at pad center, cast Sea Rift
-local function seaRiftPadClear()
+-- Full release when farm turns off (movers + aim + camera + fly cancel)
+local function releaseFarmControl()
+    _questFlyToken += 1
+    stopFarmHold()
+    clearVirtualAim()
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        for _, n in ipairs({
+            "T3tiQuestFly", "T3tiQuestGyro", "T3tiFarmHold", "T3tiFarmGyro",
+            "T3tiAF", "T3tiAFG", "T3tiTest", "T3tiTestG", "T3tiRescue",
+        }) do
+            local o = hrp:FindFirstChild(n)
+            if o then pcall(function() o:Destroy() end) end
+        end
+        pcall(function()
+            hrp.Anchored = false
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+    if char and _farmNoclipCache then
+        setNoclip(char, false, _farmNoclipCache)
+    end
+    _farmNoclipCache = nil
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    setFlyHumanoid(hum, false)
+    restoreCamera()
+end
+
+-- Pause farm movers during cutscenes so we don't fight the camera
+local function pauseFarmForCutscene()
+    stopFarmHold()
+    clearVirtualAim()
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        for _, n in ipairs({ "T3tiQuestFly", "T3tiQuestGyro", "T3tiFarmHold", "T3tiFarmGyro" }) do
+            local o = hrp:FindFirstChild(n)
+            if o then pcall(function() o:Destroy() end) end
+        end
+    end
+end
+
+local function waitOutCutscene(maxWait)
+    maxWait = maxWait or 12
+    local t0 = tick()
+    if not inCutscene() then return false end
+    pauseFarmForCutscene()
+    State.status = "cutscene · waiting"
+    -- Do NOT restoreCamera while Scriptable — Sea Rift's Heartbeat owns the cam.
+    -- Wait for the game to finish, then clean leftover rigs if needed.
+    while UI.alive and (tick() - t0) < maxWait do
+        if not inCutscene() then break end
+        task.wait(0.12)
+    end
+    if inCutscene() then
+        -- stuck Scriptable (anim never ended) — force unlock
+        restoreCamera()
+    else
+        destroyCutsceneRigs()
+        pcall(function()
+            local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+            local cam = workspace.CurrentCamera
+            if cam and hum then cam.CameraSubject = hum end
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        end)
+    end
+    task.wait(0.05)
+    return true
+end
+
+-- After casting a skill, if camera flips → learn it as cinematic for this session
+local function watchSkillForCutscene(skillName)
+    if not skillName or skillLooksCinematic(skillName) then return end
+    task.spawn(function()
+        local t0 = tick()
+        while tick() - t0 < 1.2 do
+            if inCutscene() then
+                _cutsceneSkillLearned[skillName] = true
+                State.skillEnabled[skillName] = false
+                pauseFarmForCutscene()
+                waitOutCutscene(14)
+                return
+            end
+            task.wait(0.08)
+        end
+    end)
+end
+
+local function castFarmSkills(aimPos, aimTarget)
+    if inCutscene() then return end
+    if aimPos then
+        setVirtualAim(aimPos, aimTarget)
+        faceWorld(aimPos)
+    end
+    ensureM1ToolEquipped()
+    -- selectedSkillNames already defaults cinematic moves OFF
+    local picks = selectedSkillNames()
+    if #picks == 0 then return end
+    task.spawn(function()
+        for _, n in ipairs(picks) do
+            if not State.autoFarm or not UI.alive or inCutscene() then break end
+            local ok, _, used = castSkill(n)
+            if ok then
+                watchSkillForCutscene(used or n)
+            end
+            task.wait(0.05)
+            if inCutscene() then
+                waitOutCutscene(14)
+                break
+            end
+        end
+    end)
+end
+
+-- Perch near pad → aim → cast selected (or Auto) skill. Any fruit.
+local function padClearSkill()
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return false, "no character" end
@@ -1576,10 +1867,29 @@ local function seaRiftPadClear()
     setVirtualAim(pad, nil)
     task.wait(0.05)
 
-    local ok, err = castSkill("Sea Rift")
+    local skill = State.skillName
+    if not skill or skill == "Auto" then
+        local picks = selectedSkillNames()
+        skill = picks[1]
+        if not skill then
+            local all = equippedSkillNames()
+            skill = all[1]
+        end
+    end
+    if not skill then
+        clearVirtualAim()
+        return false, "no skill on current fruit"
+    end
+
+    local ok, err = castSkill(skill)
+    if ok then watchSkillForCutscene(skill) end
+    if inCutscene() then waitOutCutscene(14) end
     clearVirtualAim()
-    return ok, err, target, pad, stand
+    return ok, err, target, pad, stand, skill
 end
+
+-- back-compat alias
+local seaRiftPadClear = padClearSkill
 
 --------------------------------------------------------------------
 -- UI
@@ -1643,15 +1953,15 @@ do
         end)
     end
 
-    local s3 = tab:Section("Sea Rift Clear")
-    s3:Label("Safe perch → aim spawn pad → Sea Rift")
+    local s3 = tab:Section("Pad Clear")
+    s3:Label("Safe perch → aim pad → Stats skill (any fruit)")
     s3:Button("Pad Clear (test)", function()
         task.spawn(function()
-            local ok, err, target, pad = seaRiftPadClear()
+            local ok, err, target, pad, _, skill = padClearSkill()
             if ok then
-                notify("Sea Rift", "cleared aim · " .. tostring(target), "good")
+                notify("Pad Clear", tostring(skill) .. " · " .. tostring(target), "good")
             else
-                notify("Sea Rift", tostring(err), "bad")
+                notify("Pad Clear", tostring(err), "bad")
             end
             if pad then
                 State.status = string.format("pad %d,%d,%d", pad.X, pad.Y, pad.Z)
@@ -1700,8 +2010,7 @@ do
         State.autoFarm = v
         savePersist()
         if not v then
-            stopFarmNoclip()
-            clearVirtualAim()
+            releaseFarmControl()
             State.status = "farm off"
         else
             State.status = "farm on"
@@ -1796,20 +2105,31 @@ do
     end)
 
     local sWep = tab:Section("Weapon / Fruit")
-    sWep:Label("Fruit: " .. tostring(currentFruitName() or "none"))
+    sWep:Label("Fruit: " .. tostring(currentFruitName() or "none")
+        .. " · Style: " .. tostring(currentFightingStyle() or "none"))
     sWep:Dropdown("M1 Tool", m1Choices, State.m1Tool, function(v)
         State.m1Tool = v
-        notify("M1", v == "Auto" and ("auto · " .. tostring(currentFruitName() or "?")) or v, "good")
+        local tip = v
+        if v == "Auto" then
+            tip = "fruit→style→held · " .. tostring(currentFruitName() or "?")
+        end
+        notify("M1", tip, "good")
     end)
-    sWep:Label("Auto = tool matching your equipped fruit name")
+    sWep:Label("Auto = fruit tool → fighting style → held → Combat")
 
     local s2 = tab:Section("Skill Inventory")
-    s2:Label("Tick skills to use while farming")
+    s2:Label("Tick farm skills · cinematic moves default OFF")
+    s2:Button("Enable Safe Skills", function()
+        for _, n in ipairs(equippedSkillNames()) do
+            State.skillEnabled[n] = not skillLooksCinematic(n)
+        end
+        notify("Skills", "safe (no cutscenes)", "good")
+    end)
     s2:Button("Enable All Skills", function()
         for _, n in ipairs(equippedSkillNames()) do
             State.skillEnabled[n] = true
         end
-        notify("Skills", "all enabled", "good")
+        notify("Skills", "all enabled (incl. cinematic)", "good")
     end)
     s2:Button("Disable All Skills", function()
         for _, n in ipairs(equippedSkillNames()) do
@@ -1820,7 +2140,8 @@ do
     for _, skillName in ipairs(equippedSkillNames()) do
         local sn = skillName
         local on = State.skillEnabled[sn] ~= false
-        s2:Toggle(sn, on, function(v)
+        local label = skillLooksCinematic(sn) and (sn .. " [cut]") or sn
+        s2:Toggle(label, on, function(v)
             State.skillEnabled[sn] = v
         end)
     end
@@ -1865,12 +2186,13 @@ do
     -- Auto skill lives here (manual skill cast UI removed)
     local skills = equippedSkillNames()
     if #skills == 0 then skills = skillRemoteNames() end
-    if #skills == 0 then skills = { "Sea Rift" } end
+    if #skills == 0 then skills = { "Auto" } end
     if not table.find(skills, State.skillName) then
         State.skillName = skills[1]
     end
     local s2 = tab:Section("Auto Skill")
     s2:Dropdown("Skill", skills, State.skillName, function(v) State.skillName = v end)
+    s2:Label("Uses current fruit skills (any fruit)")
     s2:Toggle("Auto Skill", false, function(v)
         State.autoSkill = v
         notify("Auto Skill", v and ("ON · " .. State.skillName) or "OFF", v and "good" or "bad")
@@ -1910,6 +2232,10 @@ do
     end)
     s1:Toggle("UI Sounds", true, function(v)
         UI.soundsEnabled = v
+    end)
+    s1:Button("Unlock Camera", function()
+        releaseFarmControl()
+        notify("Camera", "unlocked", "good")
     end)
 
     local sVis = tab:Section("Readability")
@@ -2166,6 +2492,9 @@ task.spawn(function()
         local okIter, errIter = pcall(function()
             getgenv().T3TI_FarmBeat = tick()
             if State.autoFarm then
+                if waitOutCutscene(14) then
+                    return
+                end
                 ensureAutoHaki()
                 local targetName = farmTargetName()
                 local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
@@ -2203,13 +2532,13 @@ task.spawn(function()
                                 arrive = math.max(4, melee * 0.5),
                                 keepNoclip = true,
                                 cancel = function()
-                                    return not State.autoFarm or not UI.alive
+                                    return not State.autoFarm or not UI.alive or inCutscene()
                                 end,
                             })
                             if cache then _farmNoclipCache = cache end
                         end
 
-                        if State.autoFarm then
+                        if State.autoFarm and not inCutscene() then
                             npc, pos, dist = resolveFarmTarget(targetName, hrp)
                             if npc and pos then
                                 stand = farmStandPos(pos, npc, hrp.Position)
@@ -2241,10 +2570,12 @@ task.spawn(function()
                                 local hum = npc:FindFirstChildOfClass("Humanoid")
                                 local hp = hum and math.floor(hum.Health) or 0
                                 local fruit = currentFruitName() or "?"
+                                local style = currentFightingStyle()
                                 local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
                                 State.status = string.format(
-                                    "%s · %s · %dhp · flat%.0f · %s",
+                                    "%s%s · %s · %dhp · flat%.0f · %s",
                                     fruit,
+                                    style and ("/" .. style) or "",
                                     targetName,
                                     hp,
                                     fdist or 0,
@@ -2307,29 +2638,66 @@ task.spawn(function()
                                 )
                             end
                         else
-                            -- No Observation pad: BV-fly to this quest's island spawn
-                            local islandStand, spawnName = questIslandStand(questOptForTarget(targetName))
-                            if islandStand and tick() - lastFly > 1.2 then
-                                lastFly = tick()
-                                _forceFarmRepath = false
-                                State.status = "island · " .. tostring(spawnName or targetName)
-                                local ok, _, cache = bvFlyTo(islandStand, {
-                                    speed = 750,
-                                    arrive = 18,
-                                    keepNoclip = true,
-                                    cancel = function()
-                                        return not State.autoFarm or not UI.alive
-                                    end,
-                                })
-                                if cache then _farmNoclipCache = cache end
-                                if not ok then
-                                    State.status = "island fail · " .. tostring(spawnName)
+                            -- No Observation pad / NPC streamed: go to quest island
+                            local islandStand, spawnName = questIslandStand(
+                                questOptForTarget(targetName),
+                                targetName
+                            )
+                            if islandStand then
+                                local distIsland = (hrp.Position - islandStand).Magnitude
+                                if tick() - lastFly > 1.2 then
+                                    lastFly = tick()
+                                    _forceFarmRepath = false
+                                    -- Cross-map: server warp is reliable; BV for local hops
+                                    if distIsland > 1800 and spawnName then
+                                        State.status = "warp · " .. tostring(spawnName)
+                                        local wok = warpTo(spawnName)
+                                        if not wok then
+                                            State.status = "warp fail · BV · " .. tostring(spawnName)
+                                            local ok, _, cache = bvFlyTo(islandStand, {
+                                                speed = 900,
+                                                arrive = 22,
+                                                keepNoclip = true,
+                                                cancel = function()
+                                                    return not State.autoFarm or not UI.alive
+                                                end,
+                                            })
+                                            if cache then _farmNoclipCache = cache end
+                                            if not ok then
+                                                State.status = "island fail · " .. tostring(spawnName)
+                                            end
+                                        else
+                                            requestFarmRepath()
+                                        end
+                                    else
+                                        State.status = string.format(
+                                            "island · %s · %.0fd",
+                                            tostring(spawnName or targetName),
+                                            distIsland
+                                        )
+                                        local ok, _, cache = bvFlyTo(islandStand, {
+                                            speed = 750,
+                                            arrive = 18,
+                                            keepNoclip = true,
+                                            cancel = function()
+                                                return not State.autoFarm or not UI.alive
+                                            end,
+                                        })
+                                        if cache then _farmNoclipCache = cache end
+                                        if not ok then
+                                            State.status = "island fail · " .. tostring(spawnName)
+                                        end
+                                    end
+                                else
+                                    State.status = string.format(
+                                        "seek · %s · %.0fd",
+                                        tostring(spawnName or targetName),
+                                        distIsland
+                                    )
                                 end
-                            elseif not islandStand then
+                            else
                                 stopFarmHold()
                                 State.status = "no pad · " .. tostring(targetName)
-                            else
-                                State.status = "seek island · " .. tostring(targetName)
                             end
                         end
                     end
@@ -2354,6 +2722,16 @@ task.spawn(function()
                 clearFarmLock()
                 stopFarmHold()
                 if Aim.on then clearVirtualAim() end
+                -- Stuck Sea Rift Heartbeat (Scriptable never ends) — unlock after ~8s
+                if inCutscene() then
+                    _scriptableStuckSince = _scriptableStuckSince or tick()
+                    if tick() - _scriptableStuckSince > 8 then
+                        restoreCamera()
+                        _scriptableStuckSince = nil
+                    end
+                else
+                    _scriptableStuckSince = nil
+                end
                 ensureAutoHaki()
                 task.wait(0.25)
             end
