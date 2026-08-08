@@ -3405,6 +3405,47 @@ local function allQuestPads(keys)
     return pads
 end
 
+local function nearestQuestPad(targetName, fromPos)
+    local keys = questTargetKeys(targetName)
+    local pads = allQuestPads(keys)
+    if #pads == 0 then return nil end
+    local from = fromPos
+    if typeof(from) ~= "Vector3" then
+        local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        from = hrp and hrp.Position or pads[1].pos
+    end
+    local best, bestD = nil, math.huge
+    for _, p in ipairs(pads) do
+        local d = (p.pos - from).Magnitude
+        if d < bestD then
+            bestD = d
+            best = p
+        end
+    end
+    return best, bestD
+end
+
+-- Farm wait/stand beside the Observation TP pad (not the sky Sea-Rift perch)
+local function farmStandAtPad(padPos)
+    if typeof(padPos) ~= "Vector3" then return nil end
+    return padPos + Vector3.new(6, 3, 6)
+end
+
+-- Preferred travel goal: Observation TP pad for the mob â†’ else island spawn
+local function questTravelGoal(targetName)
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    local from = hrp and hrp.Position
+    local pad = nearestQuestPad(targetName, from)
+    if pad then
+        return farmStandAtPad(pad.pos), "pad:" .. tostring(pad.name), pad.island
+    end
+    local stand, spawn = questIslandStand(questOptForTarget(targetName), targetName)
+    if stand then
+        return stand, "island:" .. tostring(spawn or "?"), spawn
+    end
+    return nil, nil, nil
+end
+
 --[[
   Pick stand for current kill quest.
   Prefer nearest LIVE npc matching the quest name exactly (Holy â‰  Divine).
@@ -4898,11 +4939,11 @@ local function onFarmQuestChanged(targetName)
     _farmTrackedQuest = key
     clearFarmArena()
     requestFarmRepath()
-    -- Lock travel to the new quest island until we arrive / find a near NPC
-    local stand, spawn = questIslandStand(questOptForTarget(key), key)
+    -- Lock travel to this quest's Observation TP pad (or island if no pad)
+    local stand, kind, spawn = questTravelGoal(key)
     if stand then
         _farmIslandGoal = stand
-        _farmIslandName = spawn
+        _farmIslandName = tostring(kind or spawn or key)
         _farmIslandUntil = tick() + 45
     end
     State.status = "quest swap Â· " .. key
@@ -4972,17 +5013,18 @@ task.spawn(function()
 
                     local npc, pos, dist = resolveFarmTarget(targetName, hrp)
 
-                    -- While island-hopping, ignore far NPCs (islandâ†”NPC rubberband)
+                    -- While traveling to pad/island: still take any matching live NPC
                     local islandHopping = _farmIslandGoal
                         and tick() < _farmIslandUntil
                         and typeof(_farmIslandGoal) == "Vector3"
                     if islandHopping then
-                        local nearIsland = (hrp.Position - _farmIslandGoal).Magnitude < 80
-                        if nearIsland then
+                        local nearGoal = (hrp.Position - _farmIslandGoal).Magnitude < 80
+                        if nearGoal then
                             _farmIslandGoal = nil
                             _farmIslandName = nil
                             islandHopping = false
-                        elseif npc and dist and dist < 100 then
+                        elseif npc and dist then
+                            -- Mob exists anywhere â€” leave pad path and fight
                             _farmIslandGoal = nil
                             _farmIslandName = nil
                             islandHopping = false
@@ -5078,38 +5120,32 @@ task.spawn(function()
                         local perch, perchKind, dist0 = nil, nil, nil
                         if islandHopping and _farmIslandGoal then
                             perch = _farmIslandGoal
-                            perchKind = "island:" .. tostring(_farmIslandName or "?")
+                            perchKind = tostring(_farmIslandName or "pad")
                             dist0 = (hrp.Position - perch).Magnitude
                         else
+                            -- Prefer Observation TP pad for this mob (stops island/last thrash)
+                            local padStand, padKind = questTravelGoal(targetName)
                             local waitStand, _, _, kind, d0 = questKillStand(targetName)
-                            perch, perchKind, dist0 = waitStand, kind, d0
+                            if waitStand and kind and tostring(kind):sub(1, 4) == "npc:" then
+                                perch, perchKind, dist0 = waitStand, kind, d0
+                            elseif padStand then
+                                perch, perchKind = padStand, padKind
+                                dist0 = (hrp.Position - padStand).Magnitude
+                                _farmIslandGoal = padStand
+                                _farmIslandName = padKind
+                                _farmIslandUntil = tick() + 30
+                            elseif waitStand then
+                                perch, perchKind, dist0 = waitStand, kind, d0
+                            end
                             local sameQuestLast = _lastCombatStand
                                 and _lastCombatTarget == targetName
-                                and (tick() - _lastCombatAt) < 60
-                            -- Prefer last stand ONLY when pad is nearby (AND on Y, not OR)
-                            if sameQuestLast then
-                                if (not waitStand)
-                                    or (
-                                        flatDist(_lastCombatStand, waitStand) < 55
-                                        and math.abs(_lastCombatStand.Y - waitStand.Y) < 35
-                                    )
+                                and (tick() - _lastCombatAt) < 45
+                            if sameQuestLast and perch then
+                                if flatDist(_lastCombatStand, perch) < 40
+                                    and math.abs(_lastCombatStand.Y - perch.Y) < 25
                                 then
                                     perch = _lastCombatStand
                                     perchKind = "last"
-                                end
-                            end
-                            if not perch then
-                                local islandStand, spawnName = questIslandStand(
-                                    questOptForTarget(targetName),
-                                    targetName
-                                )
-                                if islandStand then
-                                    perch = islandStand
-                                    perchKind = "island:" .. tostring(spawnName or "?")
-                                    dist0 = (hrp.Position - islandStand).Magnitude
-                                    _farmIslandGoal = islandStand
-                                    _farmIslandName = spawnName
-                                    _farmIslandUntil = tick() + 45
                                 end
                             end
                         end
@@ -5124,13 +5160,13 @@ task.spawn(function()
                                 _forceFarmRepath = false
                                 local spd = dist3 > 2500 and 950 or (dist3 > 1200 and 850 or 700)
                                 State.status = string.format(
-                                    "fly Â· %s Â· %.0fd",
+                                    "pad Â· %s Â· %.0fd",
                                     tostring(perchKind or "pad"),
                                     dist0 or dist3
                                 )
                                 local ok, _, cache = bvFlyTo(perch, {
                                     speed = spd,
-                                    arrive = 20,
+                                    arrive = 16,
                                     keepNoclip = true,
                                     maxT = math.clamp(dist3 / math.max(200, spd) + 15, 20, 120),
                                     cancel = function()
