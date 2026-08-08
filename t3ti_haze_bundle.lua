@@ -3453,7 +3453,8 @@ local function bvFlyTo(goal, opts)
 
     local dist0 = (goal - hrp.Position).Magnitude
     local t0 = tick()
-    local maxT = math.clamp(dist0 / math.max(200, speed) + 10, 8, 55)
+    local maxT = opts.maxT or math.clamp(dist0 / math.max(200, speed) + 10, 8, 55)
+    maxT = math.clamp(maxT, 8, 120)
     local okArrive = false
     local lastPos = hrp.Position
     local stuckFor = 0
@@ -3555,8 +3556,9 @@ local function bvFlyTo(goal, opts)
 end
 
 -- Keep floating at a FIXED combat stand (stiff â€” no orbit / chase)
+-- mode "fight" = collisions on (in combat); "travel"/nil = noclip (between targets)
 local _lastNoclipRefresh = 0
-local function farmHoldAt(goal, lookAt)
+local function farmHoldAt(goal, lookAt, mode)
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3576,12 +3578,20 @@ local function farmHoldAt(goal, lookAt)
         goal = Vector3.new(goal.X, ceilY, goal.Z)
     end
 
-    -- Refresh noclip infrequently (full GetDescendants every frame freezes)
-    if tick() - _lastNoclipRefresh > 1.0 or not _farmNoclipCache then
-        _lastNoclipRefresh = tick()
-        _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
+    local wantNoclip = mode ~= "fight"
+    if wantNoclip then
+        if tick() - _lastNoclipRefresh > 1.0 or not _farmNoclipCache then
+            _lastNoclipRefresh = tick()
+            _farmNoclipCache = setNoclip(char, true, _farmNoclipCache or {})
+        end
+        setFlyHumanoid(hum, true)
+    else
+        -- Fighting: drop noclip so travel tween is what uses it
+        if _farmNoclipCache then
+            setNoclip(char, false, _farmNoclipCache)
+        end
+        setFlyHumanoid(hum, true) -- still PlatformStand for hold float
     end
-    setFlyHumanoid(hum, true)
 
     local bv = hrp:FindFirstChild("T3tiFarmHold")
     if not bv then
@@ -4727,7 +4737,7 @@ task.spawn(function()
                                 _lastCombatStand = stand
                                 _lastCombatTarget = targetName
                                 _lastCombatAt = tick()
-                                farmHoldAt(stand, pos)
+                                farmHoldAt(stand, pos, "fight")
                                 fdist = flatDist(hrp.Position, pos)
 
                                 local aimPos = pos + Vector3.new(0, 2, 0)
@@ -4812,7 +4822,7 @@ task.spawn(function()
                                 end
                             else
                                 _questFlyToken += 1
-                                farmHoldAt(perch, perch)
+                                farmHoldAt(perch, perch, "travel")
                                 State.status = string.format(
                                     "wait Â· %s Â· %s",
                                     tostring(targetName),
@@ -4820,7 +4830,7 @@ task.spawn(function()
                                 )
                             end
                         else
-                            -- No Observation pad / NPC streamed: go to quest island
+                            -- No pad/NPC streamed: BV-noclip tween to quest island (never teleport)
                             local islandStand, spawnName = questIslandStand(
                                 questOptForTarget(targetName),
                                 targetName
@@ -4830,45 +4840,26 @@ task.spawn(function()
                                 if tick() - lastFly > 1.2 then
                                     lastFly = tick()
                                     _forceFarmRepath = false
-                                    -- Cross-map: server warp is reliable; BV for local hops
-                                    if distIsland > 1800 and spawnName then
-                                        State.status = "warp Â· " .. tostring(spawnName)
-                                        local wok = warpTo(spawnName)
-                                        if not wok then
-                                            State.status = "warp fail Â· BV Â· " .. tostring(spawnName)
-                                            local ok, _, cache = bvFlyTo(islandStand, {
-                                                speed = 900,
-                                                arrive = 22,
-                                                keepNoclip = true,
-                                                cancel = function()
-                                                    return not State.autoFarm or not UI.alive
-                                                end,
-                                            })
-                                            if cache then _farmNoclipCache = cache end
-                                            if not ok then
-                                                State.status = "island fail Â· " .. tostring(spawnName)
-                                            end
-                                        else
-                                            requestFarmRepath()
-                                        end
+                                    local spd = distIsland > 2500 and 950 or (distIsland > 1200 and 850 or 750)
+                                    State.status = string.format(
+                                        "fly Â· %s Â· %.0fd",
+                                        tostring(spawnName or targetName),
+                                        distIsland
+                                    )
+                                    local ok, _, cache = bvFlyTo(islandStand, {
+                                        speed = spd,
+                                        arrive = 18,
+                                        keepNoclip = true,
+                                        maxT = math.clamp(distIsland / math.max(200, spd) + 15, 20, 120),
+                                        cancel = function()
+                                            return not State.autoFarm or not UI.alive
+                                        end,
+                                    })
+                                    if cache then _farmNoclipCache = cache end
+                                    if not ok then
+                                        State.status = "island fail Â· " .. tostring(spawnName)
                                     else
-                                        State.status = string.format(
-                                            "island Â· %s Â· %.0fd",
-                                            tostring(spawnName or targetName),
-                                            distIsland
-                                        )
-                                        local ok, _, cache = bvFlyTo(islandStand, {
-                                            speed = 750,
-                                            arrive = 18,
-                                            keepNoclip = true,
-                                            cancel = function()
-                                                return not State.autoFarm or not UI.alive
-                                            end,
-                                        })
-                                        if cache then _farmNoclipCache = cache end
-                                        if not ok then
-                                            State.status = "island fail Â· " .. tostring(spawnName)
-                                        end
+                                        requestFarmRepath()
                                     end
                                 else
                                     State.status = string.format(
