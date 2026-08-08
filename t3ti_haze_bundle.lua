@@ -1,3 +1,5 @@
+-- t3ti_haze_bundle (IIFE-split: avoids >200 main-chunk locals)
+(function()
 --[[
     T3ti UI â€” Drawing API menu framework
     Standalone: no ESP / aimbot / game logic.
@@ -2206,7 +2208,11 @@ end)
 
 -- quiet boot â€” helper triggers intro + notify
 -- return S (bundled)
+_G.T3TI_UI = S
+_G.SEIM_UI = S
+end)()
 
+(function()
 --[[
     Haze Seas Helper â€” T3ti UI
     Requires t3ti_ui.lua / seim_ui.lua in executor workspace.
@@ -5252,3 +5258,4 @@ if UI.PlayBootIntro and not getgenv().T3TI_NO_INTRO then
 else
     revealUI()
 end
+end)()
