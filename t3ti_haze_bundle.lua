@@ -2212,7 +2212,7 @@ _G.T3TI_UI = S
 _G.SEIM_UI = S
 end)()
 
-(function()
+;(function()
 --[[
     Haze Seas Helper â€” T3ti UI
     Requires t3ti_ui.lua / seim_ui.lua in executor workspace.
