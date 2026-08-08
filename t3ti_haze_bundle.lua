@@ -2309,7 +2309,10 @@ end
 
 local State = {
     autoAccept = true, -- keep best quest for your level accepted
-    autoFruit = false,
+    autoFruit = false, -- legacy; prefer autoStat
+    autoStat = false,
+    autoStatName = "Fruit", -- Combat | Defense | Fruit | Sword
+    autoTransform = false,
     autoSkill = false,
     skillName = "Auto",
     skillCd = 3,
@@ -2317,6 +2320,7 @@ local State = {
     lastAccept = 0,
     acceptInterval = 1.25,
     lastFruit = 0,
+    lastTransform = 0,
     status = "ready",
     bestLabel = "-",
     -- Auto Farm
@@ -2360,6 +2364,18 @@ end
 if Persist.autoHaki ~= nil then
     State.autoHaki = Persist.autoHaki and true or false
 end
+if Persist.autoStat ~= nil then
+    State.autoStat = Persist.autoStat and true or false
+elseif Persist.autoFruit ~= nil then
+    State.autoStat = Persist.autoFruit and true or false
+    State.autoFruit = State.autoStat
+end
+if type(Persist.autoStatName) == "string" and Persist.autoStatName ~= "" then
+    State.autoStatName = Persist.autoStatName
+end
+if Persist.autoTransform ~= nil then
+    State.autoTransform = Persist.autoTransform and true or false
+end
 getgenv().T3TI_State = State
 getgenv().T3TI_FarmErr = nil
 
@@ -2368,6 +2384,10 @@ local function savePersist()
     Persist.autoAccept = State.autoAccept and true or false
     Persist.autoBuso = State.autoBuso and true or false
     Persist.autoHaki = State.autoHaki and true or false
+    Persist.autoStat = State.autoStat and true or false
+    Persist.autoFruit = State.autoStat and true or false -- legacy alias
+    Persist.autoStatName = tostring(State.autoStatName or "Fruit")
+    Persist.autoTransform = State.autoTransform and true or false
 end
 
 -- MUST be after State (Luau treats earlier refs as a different nil global)
@@ -2679,13 +2699,24 @@ local function freeStatPoints()
     end
 end
 
-local function dumpFruit(points)
+local STAT_CHOICES = { "Fruit", "Combat", "Defense", "Sword" }
+
+local function dumpStat(statName, points)
     if not StatsEvent then return false, "Stats_Event missing" end
+    statName = tostring(statName or State.autoStatName or "Fruit")
+    if not table.find(STAT_CHOICES, statName) then
+        statName = "Fruit"
+    end
     points = points or 1
     local ok, err = pcall(function()
-        StatsEvent:FireServer("Fruit", points)
+        StatsEvent:FireServer(statName, points)
     end)
     return ok, err
+end
+
+-- back-compat
+local function dumpFruit(points)
+    return dumpStat("Fruit", points)
 end
 
 local function fruitFolder()
@@ -2800,6 +2831,145 @@ local function ensureM1ToolEquipped()
     end
     return tool
 end
+
+-- Transform / Hybrid on current fruit (E / N / skill remotes when present)
+local function findTransformSkill()
+    local fruit = fruitFolder()
+    if not fruit then return nil end
+    local best, bestScore = nil, -1
+    for _, c in ipairs(fruit:GetChildren()) do
+        if c:IsA("Configuration") then
+            local attack = c:FindFirstChild("AttackNameString")
+            local name = tostring((attack and attack.Value) or c.Name)
+            local key = c:FindFirstChild("KeyString")
+            local keyStr = key and tostring(key.Value) or ""
+            local n = name:lower()
+            local score = 0
+            if n:find("hybrid", 1, true) then
+                score = 3
+            elseif n:find("transform", 1, true) or n:find("gear", 1, true) then
+                score = 2
+            elseif n:find("awaken", 1, true) or n:find("mode", 1, true) then
+                score = 1
+            end
+            if score > bestScore then
+                bestScore = score
+                best = { name = name, key = keyStr, score = score }
+            end
+        end
+    end
+    if best and best.score > 0 then
+        return best
+    end
+    -- Remotes only (no Configuration)
+    local ev = fruit:FindFirstChild("Events")
+    if ev then
+        for _, r in ipairs(ev:GetChildren()) do
+            if r:IsA("RemoteEvent") then
+                local n = r.Name:lower()
+                if n:find("transform", 1, true) or n:find("hybrid", 1, true) then
+                    return { name = r.Name, key = "E", score = 2 }
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function fruitSupportsTransform()
+    return findTransformSkill() ~= nil
+end
+
+local function isTransformed()
+    local char = LP.Character
+    if not char then return false end
+    local names = {
+        "Transformed", "IsTransformed", "InTransformation", "FruitTransformed",
+        "HybridMode", "Hybrid", "InHybrid", "AwakenedForm", "DragonForm",
+        "TransformActive", "Transformation",
+    }
+    for _, n in ipairs(names) do
+        local v = char:FindFirstChild(n) or char:FindFirstChild(n, true)
+        if v then
+            if v:IsA("BoolValue") and v.Value == true then return true end
+            if v:IsA("IntValue") and v.Value ~= 0 then return true end
+            if v:IsA("StringValue") then
+                local s = tostring(v.Value)
+                if s ~= "" and s:lower() ~= "none" and s:lower() ~= "false" and s:lower() ~= "human" then
+                    return true
+                end
+            end
+        end
+        local attr = char:GetAttribute(n)
+        if attr == true or (type(attr) == "number" and attr ~= 0) then
+            return true
+        end
+    end
+    if char:FindFirstChild("TransformModel") or char:FindFirstChild("HybridModel") then
+        return true
+    end
+    return false
+end
+
+local _transformBusyUntil = 0
+local function ensureAutoTransform(force)
+    if not State.autoTransform then return false end
+    if tick() < _transformBusyUntil then return false end
+    if not force and tick() - (State.lastTransform or 0) < 2.5 then
+        return false
+    end
+    local info = findTransformSkill()
+    if not info then return false end
+    if isTransformed() then return false end
+
+    State.lastTransform = tick()
+    _transformBusyUntil = tick() + 3.0
+
+    task.spawn(function()
+        -- Prefer skill remote, then bound key (usually E / N)
+        local fruit = fruitFolder()
+        local ev = fruit and fruit:FindFirstChild("Events")
+        local remote = ev and ev:FindFirstChild(info.name)
+        if remote and remote:IsA("RemoteEvent") then
+            pcall(function() remote:FireServer() end)
+            task.wait(0.35)
+            if isTransformed() then return end
+        end
+        local keyName = info.key
+        if keyName == "" or not keyName then
+            keyName = (info.score or 0) >= 3 and "N" or "E"
+        end
+        local kc = Enum.KeyCode[keyName]
+            or readAbilityKey("Skill7", "E")
+            or Enum.KeyCode.E
+        pressAbilityKey(kc)
+        task.wait(0.3)
+        if not isTransformed() and keyName ~= "N" then
+            pressAbilityKey(Enum.KeyCode.N)
+        end
+        if not isTransformed() and keyName ~= "E" then
+            pressAbilityKey(Enum.KeyCode.E)
+        end
+    end)
+    return true
+end
+
+-- Keep transform up (Zoan / Dragon / Saturn etc.) â€” after helpers exist
+task.spawn(function()
+    while UI.alive do
+        pcall(ensureAutoTransform)
+        task.wait(0.6)
+    end
+end)
+LP.CharacterAdded:Connect(function()
+    task.delay(1.2, function()
+        if UI.alive then
+            pcall(function()
+                ensureAutoTransform(true)
+            end)
+        end
+    end)
+end)
 
 -- All fruit remotes (minus *2 variants)
 local function skillRemoteNames()
@@ -4354,25 +4524,65 @@ end
 -- Stats
 do
     local tab = win:Tab("Stats")
-    local s1 = tab:Section("Fruit")
-    s1:Label("Fires Stats_Event Fruit with free points")
-    s1:Button("Dump 1 Point â†’ Fruit", function()
-        local ok, err = dumpFruit(1)
-        notify("Stats", ok and "sent 1" or tostring(err), ok and "good" or "bad")
+    local s1 = tab:Section("Auto Stats")
+    s1:Label("Stats_Event Â· pick which free points go into")
+    if not table.find(STAT_CHOICES, State.autoStatName) then
+        State.autoStatName = "Fruit"
+    end
+    s1:Dropdown("Stat", STAT_CHOICES, State.autoStatName, function(v)
+        State.autoStatName = v
+        savePersist()
+        notify("Stats", "auto â†’ " .. v, "good")
     end)
-    s1:Button("Dump All â†’ Fruit", function()
+    s1:Button("Dump 1 â†’ Selected", function()
+        local ok, err = dumpStat(State.autoStatName, 1)
+        notify("Stats", ok and ("sent 1 â†’ " .. State.autoStatName) or tostring(err), ok and "good" or "bad")
+    end)
+    s1:Button("Dump All â†’ Selected", function()
         local v = freeStatPoints()
         local n = v and math.floor(v.Value) or 0
         if n <= 0 then
             notify("Stats", "no free points found", "bad")
             return
         end
-        local ok, err = dumpFruit(n)
-        notify("Stats", ok and ("sent " .. n) or tostring(err), ok and "good" or "bad")
+        local ok, err = dumpStat(State.autoStatName, n)
+        notify("Stats", ok and ("sent " .. n .. " â†’ " .. State.autoStatName) or tostring(err), ok and "good" or "bad")
     end)
-    s1:Toggle("Auto Fruit Stats", false, function(v)
+    s1:Toggle("Auto Stats", State.autoStat, function(v)
+        State.autoStat = v
         State.autoFruit = v
-        notify("Auto Fruit", v and "ON" or "OFF", v and "good" or "bad")
+        savePersist()
+        notify("Auto Stats", v and ("ON Â· " .. State.autoStatName) or "OFF", v and "good" or "bad")
+    end)
+
+    local sTx = tab:Section("Transform")
+    local supports = fruitSupportsTransform()
+    local info = findTransformSkill()
+    sTx:Label(supports
+        and ("Supported Â· " .. tostring(info and info.name) .. " (" .. tostring(info and info.key or "?") .. ")")
+        or "Current fruit has no transform skill")
+    sTx:Toggle("Auto Transform", State.autoTransform, function(v)
+        if v and not fruitSupportsTransform() then
+            State.autoTransform = false
+            savePersist()
+            notify("Transform", "not supported on " .. tostring(currentFruitName() or "fruit"), "bad")
+            return
+        end
+        State.autoTransform = v
+        savePersist()
+        if v then
+            ensureAutoTransform(true)
+        end
+        notify("Transform", v and "ON" or "OFF", v and "good" or "bad")
+    end)
+    sTx:Button("Transform Now", function()
+        if not fruitSupportsTransform() then
+            notify("Transform", "not supported", "bad")
+            return
+        end
+        State.lastTransform = 0
+        ensureAutoTransform(true)
+        notify("Transform", "pressed", "good")
     end)
 
     -- Auto skill lives here (manual skill cast UI removed)
@@ -4448,10 +4658,14 @@ do
     s2:Button("Unload / Uninject", function()
         State.autoAccept = false
         State.autoFruit = false
+        State.autoStat = false
         State.autoSkill = false
         State.autoFarm = false
+        State.autoTransform = false
         -- keep Auto Accept preference; only clear farm resume
         Persist.autoFarm = false
+        Persist.autoTransform = false
+        Persist.autoStat = false
         stopFarmNoclip()
         clearVirtualAim()
         State.status = "unloaded"
@@ -4938,11 +5152,11 @@ task.spawn(function()
                 State.status = "accept? Â· " .. tostring(info):sub(1, 28)
             end
         end
-        if State.autoFruit and now - State.lastFruit >= 2 then
+        if (State.autoStat or State.autoFruit) and now - State.lastFruit >= 2 then
             State.lastFruit = now
             local v = freeStatPoints()
             if v and v.Value > 0 then
-                dumpFruit(math.min(5, math.floor(v.Value)))
+                dumpStat(State.autoStatName, math.min(5, math.floor(v.Value)))
             end
         end
         if State.autoSkill and not State.autoFarm and now - State.lastSkill >= State.skillCd then
