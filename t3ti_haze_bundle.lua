@@ -3401,9 +3401,11 @@ local MOB_ARENA_STANDS = {
     ["vergo"] = Vector3.new(2375, 34, -3112),
 }
 
--- Prefer these NPC Zones / Islands folders when pads aren't streamed in
+-- Optional per-mob zone preference (used before generic location resolve)
 local MOB_ZONE_HINTS = {
     ["vergo"] = { "Hot Island", "Half Hot Half Cold" },
+    ["snow harpy"] = { "Cold Island", "Half Cold", "Half Hot Half Cold" },
+    ["corrupt marine"] = { "Cold Island", "Half Cold", "Half Hot Half Cold" },
 }
 
 local function cachePad(targetName, pad)
@@ -3435,20 +3437,199 @@ local function knownArenaStand(targetName)
     return pos, "arena:" .. key, key
 end
 
--- When Observation pads aren't streamed: use Hot Island / island geometry (not dock spawn setter)
-local function zoneOrIslandStand(targetName)
-    local key = tostring(targetName or ""):lower()
-    local hints = MOB_ZONE_HINTS[key]
-    if not hints then
-        hints = { tostring(targetName or "") }
+-- Quest giver Location strings â†’ NPC Zones / Islands / Spawn Setter names
+local LOCATION_ALIASES = {
+    ["thriller bark"] = { "Thriller Boat", "Thriller Bark" },
+    ["skypeia island"] = { "Skypiea Island", "Sky Islands", "Skypeia Island", "Skypiean islands" },
+    ["logue city"] = { "Logue Town", "Logue City" },
+    ["half hot half cold"] = { "Half Hot Half Cold", "Hot Island", "Cold Island", "Half Cold" },
+    ["marine base town"] = { "Marine Base Town", "Marine Base" },
+    ["sea restaurant"] = { "Sea Restaurant", "Sea Resturant " },
+    ["three islands"] = { "Three Islands" },
+}
+
+local function fuzzyPlaceScore(query, name)
+    local q = tostring(query or ""):lower():gsub("%s+", " ")
+    local n = tostring(name or ""):lower():gsub("%s+", " ")
+    if q == "" or n == "" then return 0 end
+    if q == n then return 100 end
+    if n:find(q, 1, true) or q:find(n, 1, true) then return 70 end
+    -- token overlap (hot/half/cold, thriller/bark/boat, etc.)
+    local score = 0
+    for token in q:gmatch("%w+") do
+        if #token >= 3 and n:find(token, 1, true) then
+            score = score + 15
+        end
     end
+    return score
+end
+
+-- Places to approach so Streaming loads the quest mob (not the dock spawn setter)
+local function locationHintsForTarget(targetName)
+    local hints, seen = {}, {}
+    local function add(name)
+        name = tostring(name or "")
+        if name == "" then return end
+        local k = name:lower()
+        if seen[k] then return end
+        seen[k] = true
+        hints[#hints + 1] = name
+    end
+
+    local key = tostring(targetName or ""):lower()
+    if MOB_ZONE_HINTS[key] then
+        for _, h in ipairs(MOB_ZONE_HINTS[key]) do
+            add(h)
+        end
+    end
+
+    -- Name bias for split islands (Snow/Harpy/Corrupt â†’ cold; Vergo â†’ hot already in hints)
+    if key:find("snow", 1, true) or key:find("harpy", 1, true) or key:find("corrupt", 1, true) then
+        add("Cold Island")
+        add("Half Cold")
+    elseif key:find("vergo", 1, true) then
+        add("Hot Island")
+    end
+
+    local opt = questOptForTarget(targetName)
+    local loc = opt and opt.location
+    if loc then
+        add(loc)
+        local aliases = LOCATION_ALIASES[tostring(loc):lower()]
+        if aliases then
+            for _, a in ipairs(aliases) do
+                add(a)
+            end
+        end
+        local matched = matchSpawn(loc)
+        if matched then add(matched) end
+    end
+
+    -- Fuzzy-match every NPC Zone / Island against location + target
+    local queries = { loc, targetName }
+    local roots = {
+        workspace:FindFirstChild("NPC Zones"),
+        workspace:FindFirstChild("Islands"),
+    }
+    local ranked = {}
+    for _, root in ipairs(roots) do
+        if root then
+            for _, child in ipairs(root:GetChildren()) do
+                local best = 0
+                for _, q in ipairs(queries) do
+                    best = math.max(best, fuzzyPlaceScore(q, child.Name))
+                end
+                if best >= 30 then
+                    ranked[#ranked + 1] = { name = child.Name, score = best }
+                end
+            end
+        end
+    end
+    table.sort(ranked, function(a, b)
+        return a.score > b.score
+    end)
+    for _, r in ipairs(ranked) do
+        add(r.name)
+    end
+
+    if targetName then add(targetName) end
+    return hints
+end
+
+local function placeStandFromInstance(inst, label)
+    if not inst then return nil end
+    -- Live humanoids first (already streamed chunk) â€” any NPC gets you into range
+    for _, m in ipairs(inst:GetDescendants()) do
+        if m:IsA("Model") then
+            local hum = m:FindFirstChildOfClass("Humanoid")
+            local root = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
+            if hum and hum.Health > 0 and root then
+                local p = root.Position
+                if p.Magnitude > 10 then
+                    return p + Vector3.new(0, 5, 0), label
+                end
+            end
+        end
+    end
+    -- Island / zone geometry â€” prefer away from dock so far-side bosses stream in
+    local setter = spawnSetterPosition(inst.Name)
+    local best, bestScore = nil, -1
+    local sum, n = Vector3.new(0, 0, 0), 0
+    for _, p in ipairs(inst:GetDescendants()) do
+        if p:IsA("BasePart") and p.Position.Y > 2 and p.Position.Y < 200 and p.Size.Magnitude > 8 then
+            sum = sum + p.Position
+            n = n + 1
+            local score = setter and (p.Position - setter).Magnitude or p.Position.Magnitude
+            if score > bestScore then
+                bestScore = score
+                best = p.Position
+            end
+        end
+    end
+    if best and (not setter or bestScore > 80) then
+        return best + Vector3.new(0, 6, 0), label
+    end
+    if n > 0 then
+        local mid = sum / n
+        return Vector3.new(mid.X, math.clamp(mid.Y, 15, 90), mid.Z), label
+    end
+    local ok, piv = pcall(function()
+        return inst:GetPivot().Position
+    end)
+    if ok and piv and piv.Magnitude > 10 then
+        return Vector3.new(piv.X, math.clamp(piv.Y, 15, 90), piv.Z), label
+    end
+    return nil
+end
+
+-- Any Observation pads on the quest's islands (even wrong mob) â†’ stream range
+local function observationLocationStand(targetName)
+    local hints = locationHintsForTarget(targetName)
+    local root = PG:FindFirstChild("ObservationHaki_Server", true)
+    root = root and root:FindFirstChild("SpawnPoints", true)
+    if not root then return nil end
+
+    local bestPos, bestIsland, bestN = nil, nil, 0
+    for _, island in ipairs(root:GetChildren()) do
+        local score = 0
+        for _, h in ipairs(hints) do
+            score = math.max(score, fuzzyPlaceScore(h, island.Name))
+        end
+        if score >= 30 then
+            local sum, n = Vector3.new(0, 0, 0), 0
+            for _, p in ipairs(island:GetChildren()) do
+                if p:IsA("BasePart") then
+                    sum = sum + p.Position
+                    n = n + 1
+                end
+            end
+            if n > bestN then
+                bestN = n
+                bestPos = sum / n
+                bestIsland = island.Name
+            end
+        end
+    end
+    if bestPos then
+        return bestPos + Vector3.new(6, 3, 6), "obs:" .. tostring(bestIsland), bestIsland
+    end
+    return nil
+end
+
+-- When Observation pads aren't streamed: approach quest location zones/islands (all quests)
+local function zoneOrIslandStand(targetName)
+    local hints = locationHintsForTarget(targetName)
     local zones = workspace:FindFirstChild("NPC Zones")
+    local islands = workspace:FindFirstChild("Islands")
+
+    -- 1) Matching live NPC already streamed in a hinted zone
     if zones then
         for _, hint in ipairs(hints) do
             local zone = zones:FindFirstChild(hint)
             if zone then
+                local keys = questTargetKeys(targetName)
                 for _, m in ipairs(zone:GetDescendants()) do
-                    if m:IsA("Model") then
+                    if m:IsA("Model") and npcModelMatches(m, keys) then
                         local hum = m:FindFirstChildOfClass("Humanoid")
                         if hum and hum.Health > 0 then
                             local ok, piv = pcall(function()
@@ -3463,25 +3644,15 @@ local function zoneOrIslandStand(targetName)
             end
         end
     end
-    local islands = workspace:FindFirstChild("Islands")
-    if islands then
-        for _, hint in ipairs(hints) do
-            local island = islands:FindFirstChild(hint)
-            if island then
-                local setter = spawnSetterPosition(hint)
-                local best, bestScore = nil, -1
-                for _, p in ipairs(island:GetDescendants()) do
-                    if p:IsA("BasePart") and p.Position.Y > 8 and p.Position.Y < 90 and p.Size.Magnitude > 25 then
-                        local score = setter and (p.Position - setter).Magnitude or 0
-                        if score > bestScore then
-                            bestScore = score
-                            best = p.Position
-                        end
-                    end
-                end
-                if best and bestScore > 200 then
-                    return best + Vector3.new(0, 6, 0), "land:" .. hint, hint
-                end
+
+    -- 2) Island / zone geometry for each hint (gets you into stream range)
+    for _, hint in ipairs(hints) do
+        local inst = (islands and islands:FindFirstChild(hint))
+            or (zones and zones:FindFirstChild(hint))
+        if inst then
+            local stand = placeStandFromInstance(inst, "land:" .. hint)
+            if stand then
+                return stand, "land:" .. hint, hint
             end
         end
     end
@@ -3530,7 +3701,8 @@ local function farmStandAtPad(padPos)
     return padPos + Vector3.new(6, 3, 6)
 end
 
--- Preferred travel: live pad â†’ cached pad â†’ known arena â†’ Hot Island land â†’ dock spawn
+-- Preferred travel for ANY quest (never sit on dock while island/zone/obs exists):
+-- mob pad â†’ cache â†’ arena â†’ obs island pads â†’ zone/island geometry â†’ dock last
 local function questTravelGoal(targetName)
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
     local from = hrp and hrp.Position
@@ -3547,12 +3719,26 @@ local function questTravelGoal(targetName)
     if arena then
         return arena, ak, ai
     end
+    local obs, okind, oisl = observationLocationStand(targetName)
+    if obs then
+        return obs, okind, oisl
+    end
     local zone, zk, zi = zoneOrIslandStand(targetName)
     if zone then
         return zone, zk, zi
     end
-    local stand, spawn = questIslandStand(questOptForTarget(targetName), targetName)
+    -- Last resort: spawn setter â€” but offset inland if Islands model exists
+    local opt = questOptForTarget(targetName)
+    local stand, spawn = questIslandStand(opt, targetName)
     if stand then
+        local islands = workspace:FindFirstChild("Islands")
+        local island = islands and spawn and islands:FindFirstChild(spawn)
+        if island then
+            local inland = placeStandFromInstance(island, "land:" .. tostring(spawn))
+            if inland and (inland - stand).Magnitude > 60 then
+                return inland, "land:" .. tostring(spawn), spawn
+            end
+        end
         return stand, "island:" .. tostring(spawn or "?"), spawn
     end
     return nil, nil, nil
@@ -3650,6 +3836,10 @@ local function questKillStand(targetName)
     local arena = MOB_ARENA_STANDS[tostring(targetName):lower()]
     if arena then
         return arena, 0, targetName, "arena:" .. tostring(targetName), (arena - from).Magnitude
+    end
+    local obsStand = observationLocationStand(targetName)
+    if obsStand then
+        return obsStand, 0, targetName, "obs", (obsStand - from).Magnitude
     end
     local zoneStand = zoneOrIslandStand(targetName)
     if zoneStand then
