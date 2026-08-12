@@ -3313,18 +3313,76 @@ local function ensureBestQuest()
     return false, err or "accept failed"
 end
 
--- Spawn pad parts live under ObservationHaki SpawnPoints
+-- Spawn pad parts live under ObservationHaki SpawnPoints (BasePart CFrames = exact spawn)
+local function obsSpawnPointsRoot()
+    local root = PG:FindFirstChild("ObservationHaki_Server", true)
+    return root and root:FindFirstChild("SpawnPoints", true)
+end
+
+-- Keep every Observation pad CFrame we see (folders unload with Streaming)
+local function harvestObservationPads()
+    local root = obsSpawnPointsRoot()
+    if not root then return 0 end
+    Persist.padCache = Persist.padCache or {}
+    local n = 0
+    for _, island in ipairs(root:GetChildren()) do
+        for _, p in ipairs(island:GetChildren()) do
+            if p:IsA("BasePart") then
+                local base = p.Name:lower():gsub("%d+$", ""):gsub("%s+$", "")
+                if #base >= 3 then
+                    Persist.padCache[base] = {
+                        x = p.Position.X,
+                        y = p.Position.Y,
+                        z = p.Position.Z,
+                        name = p.Name,
+                        island = island.Name,
+                    }
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
 local function findQuestSpawnPads(targetName)
     local key = tostring(targetName or ""):lower()
     if key == "" then return {} end
+    harvestObservationPads()
     local pads = {}
-    local root = PG:FindFirstChild("ObservationHaki_Server", true)
-    root = root and root:FindFirstChild("SpawnPoints", true)
-    if not root then return pads end
-    for _, island in ipairs(root:GetChildren()) do
-        for _, p in ipairs(island:GetChildren()) do
-            if p:IsA("BasePart") and p.Name:lower():find(key, 1, true) then
-                pads[#pads + 1] = { part = p, island = island.Name, name = p.Name, pos = p.Position }
+    local root = obsSpawnPointsRoot()
+    if root then
+        for _, island in ipairs(root:GetChildren()) do
+            for _, p in ipairs(island:GetChildren()) do
+                if p:IsA("BasePart") then
+                    local pname = p.Name:lower()
+                    local pbase = pname:gsub("%d+$", ""):gsub("%s+$", "")
+                    -- Match "Snow Harpy2400" to "snow harpy" via name or stripped base
+                    if pname:find(key, 1, true) or (pbase ~= "" and (pbase == key or pbase:find(key, 1, true) or key:find(pbase, 1, true))) then
+                        pads[#pads + 1] = {
+                            part = p,
+                            island = island.Name,
+                            name = p.Name,
+                            pos = p.Position,
+                            cf = p.CFrame,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    -- Cached CFrames when the island folder isn't streamed into Observation yet
+    if #pads == 0 and Persist.padCache then
+        for base, c in pairs(Persist.padCache) do
+            if base == key or base:find(key, 1, true) or key:find(base, 1, true) then
+                local pos = Vector3.new(c.x, c.y, c.z)
+                pads[#pads + 1] = {
+                    part = nil,
+                    island = c.island,
+                    name = c.name or base,
+                    pos = pos,
+                    cf = CFrame.new(pos),
+                }
             end
         end
     end
@@ -3425,8 +3483,19 @@ end
 local function cachedPadStand(targetName)
     local key = tostring(targetName or ""):lower()
     local c = Persist.padCache and Persist.padCache[key]
+    if not c then
+        -- try partial (cache keys are stripped pad bases)
+        if Persist.padCache then
+            for base, entry in pairs(Persist.padCache) do
+                if base:find(key, 1, true) or key:find(base, 1, true) then
+                    c = entry
+                    break
+                end
+            end
+        end
+    end
     if not c then return nil end
-    local pos = Vector3.new(c.x, c.y, c.z) + Vector3.new(6, 3, 6)
+    local pos = Vector3.new(c.x, c.y, c.z) + Vector3.new(0, 3, 0)
     return pos, "cache:" .. tostring(c.name or key), c.island
 end
 
@@ -3695,21 +3764,23 @@ local function nearestQuestPad(targetName, fromPos)
     return best, bestD
 end
 
--- Farm wait/stand beside the Observation TP pad (not the sky Sea-Rift perch)
+-- Stand ON the Observation spawn pad (CFrame) so respawns / stream triggers work
 local function farmStandAtPad(padPos)
     if typeof(padPos) ~= "Vector3" then return nil end
-    return padPos + Vector3.new(6, 3, 6)
+    return padPos + Vector3.new(0, 3, 0)
 end
 
--- Preferred travel for ANY quest (never sit on dock while island/zone/obs exists):
--- mob pad â†’ cache â†’ arena â†’ obs island pads â†’ zone/island geometry â†’ dock last
+-- Preferred travel for ANY quest: Observation spawn CFrame first, always
 local function questTravelGoal(targetName)
+    harvestObservationPads()
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
     local from = hrp and hrp.Position
     local pad = nearestQuestPad(targetName, from)
     if pad then
         cachePad(targetName, pad)
-        return farmStandAtPad(pad.pos), "pad:" .. tostring(pad.name), pad.island
+        -- Exact spawn pad CFrame / position
+        local stand = farmStandAtPad(pad.pos)
+        return stand, "pad:" .. tostring(pad.name), pad.island
     end
     local cached, ck, ci = cachedPadStand(targetName)
     if cached then
@@ -3727,7 +3798,6 @@ local function questTravelGoal(targetName)
     if zone then
         return zone, zk, zi
     end
-    -- Last resort: spawn setter â€” but offset inland if Islands model exists
     local opt = questOptForTarget(targetName)
     local stand, spawn = questIslandStand(opt, targetName)
     if stand then
@@ -3764,18 +3834,20 @@ local function questKillStand(targetName)
         if not m:IsA("Model") then return end
         if not npcModelMatches(m, keys) then return end
         local hum = m:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health <= 0 then return end
+        if not hum then return end
         local ok, piv = pcall(function() return m:GetPivot().Position end)
         if not ok or not piv then return end
-        count = count + 1
-        local d = (piv - from).Magnitude
-        if d < nearestDist then
-            nearestDist = d
-            nearest = piv
-            hitName = m.Name
-            -- Learn arena from live boss so next time we don't sit at the dock
-            if d < 5000 then
-                cachePad(targetName, { pos = piv, name = m.Name, island = "live" })
+        -- Alive = fight target; dead = still a spawn wait (respawn on pad)
+        if hum.Health > 0 then
+            count = count + 1
+            local d = (piv - from).Magnitude
+            if d < nearestDist then
+                nearestDist = d
+                nearest = piv
+                hitName = m.Name
+                if d < 5000 then
+                    cachePad(targetName, { pos = piv, name = m.Name, island = "live" })
+                end
             end
         end
     end
@@ -3825,12 +3897,12 @@ local function questKillStand(targetName)
     if bestPad then
         cachePad(targetName, bestPad)
         -- Wait perch at pad height (same Y band as combat) â€” +6 caused post-kill bob
-        return bestPad.pos + Vector3.new(6, 2, 6), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
+        return bestPad.pos + Vector3.new(0, 3, 0), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
     end
 
     local cached = Persist.padCache and Persist.padCache[tostring(targetName):lower()]
     if cached then
-        local cpos = Vector3.new(cached.x, cached.y, cached.z) + Vector3.new(6, 2, 6)
+        local cpos = Vector3.new(cached.x, cached.y, cached.z) + Vector3.new(0, 3, 0)
         return cpos, 0, targetName, "cache:" .. tostring(cached.name or targetName), (cpos - from).Magnitude
     end
     local arena = MOB_ARENA_STANDS[tostring(targetName):lower()]
@@ -5447,7 +5519,7 @@ task.spawn(function()
                             perchKind = tostring(_farmIslandName or "pad")
                             dist0 = (hrp.Position - perch).Magnitude
                         else
-                            -- Prefer Observation TP pad for this mob (stops island/last thrash)
+                            -- Prefer Observation spawn pad CFrame while waiting for respawn
                             local padStand, padKind = questTravelGoal(targetName)
                             local waitStand, _, _, kind, d0 = questKillStand(targetName)
                             if waitStand and kind and tostring(kind):sub(1, 4) == "npc:" then
@@ -5461,10 +5533,16 @@ task.spawn(function()
                             elseif waitStand then
                                 perch, perchKind, dist0 = waitStand, kind, d0
                             end
+                            -- Never replace a spawn-pad wait with "last" (misses respawns)
+                            local kindStr = tostring(perchKind or "")
+                            local isPadWait = kindStr:sub(1, 4) == "pad:"
+                                or kindStr:sub(1, 6) == "cache:"
+                                or kindStr:sub(1, 6) == "arena:"
+                                or kindStr:sub(1, 4) == "obs:"
                             local sameQuestLast = _lastCombatStand
                                 and _lastCombatTarget == targetName
                                 and (tick() - _lastCombatAt) < 45
-                            if sameQuestLast and perch then
+                            if sameQuestLast and perch and not isPadWait then
                                 if flatDist(_lastCombatStand, perch) < 40
                                     and math.abs(_lastCombatStand.Y - perch.Y) < 25
                                 then
@@ -5564,6 +5642,13 @@ task.spawn(function()
     clearVirtualAim()
     stopFarmNoclip()
     clearFarmArena()
+end)
+
+task.spawn(function()
+    while UI.alive do
+        pcall(harvestObservationPads)
+        task.wait(4)
+    end
 end)
 
 task.spawn(function()
