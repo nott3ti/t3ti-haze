@@ -1590,7 +1590,9 @@ local function allQuestPads(keys)
     local seen = {}
     for _, k in ipairs(keys) do
         for _, p in ipairs(findQuestSpawnPads(k)) do
+            -- Cached pads have part=nil — never use nil as table key
             local id = p.part
+                or (tostring(p.name) .. "@" .. tostring(p.island) .. "@" .. tostring(p.pos and p.pos.X) .. "," .. tostring(p.pos and p.pos.Z))
             if not seen[id] then
                 seen[id] = true
                 pads[#pads + 1] = p
