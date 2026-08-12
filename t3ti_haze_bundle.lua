@@ -3420,12 +3420,14 @@ local function findQuestSpawnPads(targetName)
     end
     if #pads == 0 and Persist.padCache then
         for base, c in pairs(Persist.padCache) do
-            if padNameMatchesKey(base, key) or padNameMatchesKey(c.name, key) then
+            local nm = c.name or base
+            -- Must match by pad name â€” ignore quest-keyed junk entries
+            if padNameMatchesKey(nm, key) then
                 local pos = Vector3.new(c.x, c.y, c.z)
                 pads[#pads + 1] = {
                     part = nil,
                     island = c.island,
-                    name = c.name or base,
+                    name = nm,
                     pos = pos,
                     cf = CFrame.new(pos),
                 }
@@ -3516,29 +3518,55 @@ local function cachePad(targetName, pad)
     if not pad or typeof(pad.pos) ~= "Vector3" then return end
     local key = tostring(targetName or ""):lower()
     if key == "" then return end
+    -- Never cache a pad whose name doesn't match the quest (old bug: Pirate â†’ Skull Pirate)
+    if pad.name and not padNameMatchesKey(pad.name, key) then
+        return
+    end
     Persist.padCache = Persist.padCache or {}
-    Persist.padCache[key] = {
+    local entry = {
         x = pad.pos.X,
         y = pad.pos.Y,
         z = pad.pos.Z,
         name = pad.name,
         island = pad.island,
     }
+    Persist.padCache[key] = entry
+    local pbase = tostring(pad.name or ""):lower():gsub("%d+$", ""):gsub("%s+$", "")
+    if pbase ~= "" and pbase ~= key then
+        Persist.padCache[pbase] = entry
+    end
 end
+
+local function scrubPadCache()
+    Persist.padCache = Persist.padCache or {}
+    for k, c in pairs(Persist.padCache) do
+        if type(c) ~= "table" or not c.name then
+            Persist.padCache[k] = nil
+        elseif not padNameMatchesKey(c.name, k) and tostring(k):find(" ", 1, true) then
+            -- quest-keyed junk (e.g. ["skull pirate"] = Pirate1338)
+            Persist.padCache[k] = nil
+        end
+    end
+end
+scrubPadCache()
 
 local function cachedPadStand(targetName)
     local key = tostring(targetName or ""):lower()
     local c = Persist.padCache and Persist.padCache[key]
+    if c and c.name and not padNameMatchesKey(c.name, key) then
+        Persist.padCache[key] = nil
+        c = nil
+    end
     if not c and Persist.padCache then
         for base, entry in pairs(Persist.padCache) do
-            if padNameMatchesKey(base, key) or padNameMatchesKey(entry.name, key) then
+            local nm = entry.name or base
+            if padNameMatchesKey(nm, key) then
                 c = entry
                 break
             end
         end
     end
     if not c then return nil end
-    -- Locate waypoint only (slightly above pad) â€” not a combat perch
     local pos = Vector3.new(c.x, c.y, c.z) + Vector3.new(0, 4, 0)
     return pos, "locate:" .. tostring(c.name or key), c.island
 end
