@@ -2350,6 +2350,8 @@ local State = {
     autoBuso = true,
     autoHaki = true, -- Observation Haki
     lastHakiToggle = 0,
+    antiAfk = true, -- stop Roblox idle kick while farming
+    lastAntiAfk = 0,
 }
 
 -- Survive loadstring reloads + allow MCP live tests
@@ -2382,6 +2384,9 @@ end
 if Persist.autoTransform ~= nil then
     State.autoTransform = Persist.autoTransform and true or false
 end
+if Persist.antiAfk ~= nil then
+    State.antiAfk = Persist.antiAfk and true or false
+end
 getgenv().T3TI_State = State
 getgenv().T3TI_FarmErr = nil
 
@@ -2394,7 +2399,43 @@ local function savePersist()
     Persist.autoFruit = State.autoStat and true or false -- legacy alias
     Persist.autoStatName = tostring(State.autoStatName or "Fruit")
     Persist.autoTransform = State.autoTransform and true or false
+    Persist.antiAfk = State.antiAfk and true or false
 end
+
+-- Roblox idle kick (~20m). Mouse nudge + VirtualUser when Idled fires.
+local function antiAfkPulse()
+    if not State.antiAfk then return false end
+    State.lastAntiAfk = tick()
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(960, 540)
+        local x, y = vp.X * 0.5, vp.Y * 0.5
+        VirtualInputManager:SendMouseMoveEvent(x + 2, y, game)
+        task.wait(0.03)
+        VirtualInputManager:SendMouseMoveEvent(x, y, game)
+    end)
+    pcall(function()
+        local VU = game:GetService("VirtualUser")
+        VU:CaptureController()
+        VU:ClickButton2(Vector2.new())
+    end)
+    return true
+end
+
+LP.Idled:Connect(function()
+    if UI.alive and State.antiAfk then
+        antiAfkPulse()
+    end
+end)
+
+task.spawn(function()
+    while UI.alive do
+        if State.antiAfk and tick() - (State.lastAntiAfk or 0) > 60 then
+            antiAfkPulse()
+        end
+        task.wait(5)
+    end
+end)
 
 -- MUST be after State (Luau treats earlier refs as a different nil global)
 local _hakiBusyUntil = 0
@@ -5122,6 +5163,14 @@ do
     s1:Button("Unlock Camera", function()
         releaseFarmControl()
         notify("Camera", "unlocked", "good")
+    end)
+    s1:Toggle("Anti AFK", State.antiAfk, function(v)
+        State.antiAfk = v
+        savePersist()
+        if v then
+            antiAfkPulse()
+        end
+        notify("Anti AFK", v and "ON" or "OFF", v and "good" or "bad")
     end)
 
     local sVis = tab:Section("Readability")
