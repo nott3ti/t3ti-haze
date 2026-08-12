@@ -2653,6 +2653,7 @@ local function spawnForEnemyName(targetName)
         { "bubble", "Bubble Island" },
         { "restaurant", "Sea Restaurant" },
         { "starter", "Starter Island" },
+        { "vergo", "Half Hot Half Cold" },
     }
     for _, h in ipairs(hints) do
         if n:find(h[1], 1, true) then
@@ -3373,13 +3374,118 @@ end
 local function npcNameMatches(instName, keys)
     local n = tostring(instName or ""):lower()
     n = n:gsub("%d+$", ""):gsub("%s+$", "")
+    -- digit-only names become "" â€” never match (avoids empty:find / false hits)
+    if n == "" or #n < 3 then return false end
     for _, k in ipairs(keys) do
-        -- exact / contains key only â€” avoid k:find(n) which lets "soldier" match everything
-        if n == k or n:find(k, 1, true) then
+        local kk = tostring(k or ""):lower()
+        if kk ~= "" and (n == kk or n:find(kk, 1, true)) then
             return true
         end
     end
     return false
+end
+
+-- Models are often "Vergo1140"; authoritative name is NPCName StringValue
+local function npcModelMatches(m, keys)
+    if not m then return false end
+    if npcNameMatches(m.Name, keys) then return true end
+    local nv = m:FindFirstChild("NPCName")
+    if nv and typeof(nv.Value) == "string" then
+        return npcNameMatches(nv.Value, keys)
+    end
+    return false
+end
+
+-- Boss arenas Observation pads often unload when far (Streaming). Absolute waits.
+local MOB_ARENA_STANDS = {
+    ["vergo"] = Vector3.new(2375, 34, -3112),
+}
+
+-- Prefer these NPC Zones / Islands folders when pads aren't streamed in
+local MOB_ZONE_HINTS = {
+    ["vergo"] = { "Hot Island", "Half Hot Half Cold" },
+}
+
+local function cachePad(targetName, pad)
+    if not pad or typeof(pad.pos) ~= "Vector3" then return end
+    local key = tostring(targetName or ""):lower()
+    if key == "" then return end
+    Persist.padCache = Persist.padCache or {}
+    Persist.padCache[key] = {
+        x = pad.pos.X,
+        y = pad.pos.Y,
+        z = pad.pos.Z,
+        name = pad.name,
+        island = pad.island,
+    }
+end
+
+local function cachedPadStand(targetName)
+    local key = tostring(targetName or ""):lower()
+    local c = Persist.padCache and Persist.padCache[key]
+    if not c then return nil end
+    local pos = Vector3.new(c.x, c.y, c.z) + Vector3.new(6, 3, 6)
+    return pos, "cache:" .. tostring(c.name or key), c.island
+end
+
+local function knownArenaStand(targetName)
+    local key = tostring(targetName or ""):lower()
+    local pos = MOB_ARENA_STANDS[key]
+    if not pos then return nil end
+    return pos, "arena:" .. key, key
+end
+
+-- When Observation pads aren't streamed: use Hot Island / island geometry (not dock spawn setter)
+local function zoneOrIslandStand(targetName)
+    local key = tostring(targetName or ""):lower()
+    local hints = MOB_ZONE_HINTS[key]
+    if not hints then
+        hints = { tostring(targetName or "") }
+    end
+    local zones = workspace:FindFirstChild("NPC Zones")
+    if zones then
+        for _, hint in ipairs(hints) do
+            local zone = zones:FindFirstChild(hint)
+            if zone then
+                for _, m in ipairs(zone:GetDescendants()) do
+                    if m:IsA("Model") then
+                        local hum = m:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health > 0 then
+                            local ok, piv = pcall(function()
+                                return m:GetPivot().Position
+                            end)
+                            if ok and piv then
+                                return piv + Vector3.new(0, 5, 0), "zone:" .. hint, hint
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local islands = workspace:FindFirstChild("Islands")
+    if islands then
+        for _, hint in ipairs(hints) do
+            local island = islands:FindFirstChild(hint)
+            if island then
+                local setter = spawnSetterPosition(hint)
+                local best, bestScore = nil, -1
+                for _, p in ipairs(island:GetDescendants()) do
+                    if p:IsA("BasePart") and p.Position.Y > 8 and p.Position.Y < 90 and p.Size.Magnitude > 25 then
+                        local score = setter and (p.Position - setter).Magnitude or 0
+                        if score > bestScore then
+                            bestScore = score
+                            best = p.Position
+                        end
+                    end
+                end
+                if best and bestScore > 200 then
+                    return best + Vector3.new(0, 6, 0), "land:" .. hint, hint
+                end
+            end
+        end
+    end
+    return nil
 end
 
 -- Collect ObservationHaki pads for any alias key
@@ -3424,13 +3530,26 @@ local function farmStandAtPad(padPos)
     return padPos + Vector3.new(6, 3, 6)
 end
 
--- Preferred travel goal: Observation TP pad for the mob â†’ else island spawn
+-- Preferred travel: live pad â†’ cached pad â†’ known arena â†’ Hot Island land â†’ dock spawn
 local function questTravelGoal(targetName)
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
     local from = hrp and hrp.Position
     local pad = nearestQuestPad(targetName, from)
     if pad then
+        cachePad(targetName, pad)
         return farmStandAtPad(pad.pos), "pad:" .. tostring(pad.name), pad.island
+    end
+    local cached, ck, ci = cachedPadStand(targetName)
+    if cached then
+        return cached, ck, ci
+    end
+    local arena, ak, ai = knownArenaStand(targetName)
+    if arena then
+        return arena, ak, ai
+    end
+    local zone, zk, zi = zoneOrIslandStand(targetName)
+    if zone then
+        return zone, zk, zi
     end
     local stand, spawn = questIslandStand(questOptForTarget(targetName), targetName)
     if stand then
@@ -3457,7 +3576,7 @@ local function questKillStand(targetName)
 
     local function considerModel(m)
         if not m:IsA("Model") then return end
-        if not npcNameMatches(m.Name, keys) then return end
+        if not npcModelMatches(m, keys) then return end
         local hum = m:FindFirstChildOfClass("Humanoid")
         if hum and hum.Health <= 0 then return end
         local ok, piv = pcall(function() return m:GetPivot().Position end)
@@ -3468,6 +3587,10 @@ local function questKillStand(targetName)
             nearestDist = d
             nearest = piv
             hitName = m.Name
+            -- Learn arena from live boss so next time we don't sit at the dock
+            if d < 5000 then
+                cachePad(targetName, { pos = piv, name = m.Name, island = "live" })
+            end
         end
     end
 
@@ -3514,8 +3637,23 @@ local function questKillStand(targetName)
         end
     end
     if bestPad then
+        cachePad(targetName, bestPad)
         -- Wait perch at pad height (same Y band as combat) â€” +6 caused post-kill bob
         return bestPad.pos + Vector3.new(6, 2, 6), #pads, targetName, "pad:" .. bestPad.name, bestPadDist
+    end
+
+    local cached = Persist.padCache and Persist.padCache[tostring(targetName):lower()]
+    if cached then
+        local cpos = Vector3.new(cached.x, cached.y, cached.z) + Vector3.new(6, 2, 6)
+        return cpos, 0, targetName, "cache:" .. tostring(cached.name or targetName), (cpos - from).Magnitude
+    end
+    local arena = MOB_ARENA_STANDS[tostring(targetName):lower()]
+    if arena then
+        return arena, 0, targetName, "arena:" .. tostring(targetName), (arena - from).Magnitude
+    end
+    local zoneStand = zoneOrIslandStand(targetName)
+    if zoneStand then
+        return zoneStand, 0, targetName, "land", (zoneStand - from).Magnitude
     end
 
     return nil, "no NPCs/pads for " .. targetName
@@ -3989,7 +4127,7 @@ local function findNearestEnemyModel(targetName)
     local best, bestDist, bestPos = nil, math.huge, nil
     forEachEnemyModel(function(m)
         if not m:IsA("Model") then return end
-        if not npcNameMatches(m.Name, keys) then return end
+        if not npcModelMatches(m, keys) then return end
         local hum = m:FindFirstChildOfClass("Humanoid")
         if not hum or hum.Health <= 0 then return end
         local ok, piv = pcall(function() return m:GetPivot().Position end)
@@ -4001,6 +4139,9 @@ local function findNearestEnemyModel(targetName)
             bestPos = piv
         end
     end)
+    if best and bestPos then
+        cachePad(targetName, { pos = bestPos, name = best.Name, island = "live" })
+    end
     return best, bestPos, bestDist
 end
 
@@ -4970,7 +5111,7 @@ local function resolveFarmTarget(targetName, hrp)
     if _farmLockNpc and _farmLockNpc.Parent then
         local keys = questTargetKeys(targetName)
         local hum = _farmLockNpc:FindFirstChildOfClass("Humanoid")
-        local nameOk = npcNameMatches(_farmLockNpc.Name, keys)
+        local nameOk = npcModelMatches(_farmLockNpc, keys)
         if hum and hum.Health > 0 and nameOk then
             local ok, piv = pcall(function()
                 return _farmLockNpc:GetPivot().Position
