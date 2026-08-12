@@ -3386,6 +3386,17 @@ local function harvestObservationPads()
     return n
 end
 
+local function padNameMatchesKey(padName, key)
+    key = tostring(key or ""):lower():gsub("%s+$", "")
+    if key == "" then return false end
+    local pname = tostring(padName or ""):lower()
+    local pbase = pname:gsub("%d+$", ""):gsub("%s+$", "")
+    if pbase == "" or #pbase < 3 then return false end
+    -- Exact / pad contains full quest name (Snow Harpy2400 Â· snow harpy)
+    -- NEVER key:find(pbase) â€” "skull pirate" would match pad "Pirate"
+    return pbase == key or pbase:find(key, 1, true) or pname:find(key, 1, true)
+end
+
 local function findQuestSpawnPads(targetName)
     local key = tostring(targetName or ""):lower()
     if key == "" then return {} end
@@ -3395,27 +3406,21 @@ local function findQuestSpawnPads(targetName)
     if root then
         for _, island in ipairs(root:GetChildren()) do
             for _, p in ipairs(island:GetChildren()) do
-                if p:IsA("BasePart") then
-                    local pname = p.Name:lower()
-                    local pbase = pname:gsub("%d+$", ""):gsub("%s+$", "")
-                    -- Match "Snow Harpy2400" to "snow harpy" via name or stripped base
-                    if pname:find(key, 1, true) or (pbase ~= "" and (pbase == key or pbase:find(key, 1, true) or key:find(pbase, 1, true))) then
-                        pads[#pads + 1] = {
-                            part = p,
-                            island = island.Name,
-                            name = p.Name,
-                            pos = p.Position,
-                            cf = p.CFrame,
-                        }
-                    end
+                if p:IsA("BasePart") and padNameMatchesKey(p.Name, key) then
+                    pads[#pads + 1] = {
+                        part = p,
+                        island = island.Name,
+                        name = p.Name,
+                        pos = p.Position,
+                        cf = p.CFrame,
+                    }
                 end
             end
         end
     end
-    -- Cached CFrames when the island folder isn't streamed into Observation yet
     if #pads == 0 and Persist.padCache then
         for base, c in pairs(Persist.padCache) do
-            if base == key or base:find(key, 1, true) or key:find(base, 1, true) then
+            if padNameMatchesKey(base, key) or padNameMatchesKey(c.name, key) then
                 local pos = Vector3.new(c.x, c.y, c.z)
                 pads[#pads + 1] = {
                     part = nil,
@@ -3524,27 +3529,25 @@ end
 local function cachedPadStand(targetName)
     local key = tostring(targetName or ""):lower()
     local c = Persist.padCache and Persist.padCache[key]
-    if not c then
-        -- try partial (cache keys are stripped pad bases)
-        if Persist.padCache then
-            for base, entry in pairs(Persist.padCache) do
-                if base:find(key, 1, true) or key:find(base, 1, true) then
-                    c = entry
-                    break
-                end
+    if not c and Persist.padCache then
+        for base, entry in pairs(Persist.padCache) do
+            if padNameMatchesKey(base, key) or padNameMatchesKey(entry.name, key) then
+                c = entry
+                break
             end
         end
     end
     if not c then return nil end
-    local pos = Vector3.new(c.x, c.y, c.z) + Vector3.new(0, 3, 0)
-    return pos, "cache:" .. tostring(c.name or key), c.island
+    -- Locate waypoint only (slightly above pad) â€” not a combat perch
+    local pos = Vector3.new(c.x, c.y, c.z) + Vector3.new(0, 4, 0)
+    return pos, "locate:" .. tostring(c.name or key), c.island
 end
 
 local function knownArenaStand(targetName)
     local key = tostring(targetName or ""):lower()
     local pos = MOB_ARENA_STANDS[key]
     if not pos then return nil end
-    return pos, "arena:" .. key, key
+    return pos, "locate:" .. key, key
 end
 
 -- Quest giver Location strings â†’ NPC Zones / Islands / Spawn Setter names
@@ -3805,13 +3808,13 @@ local function nearestQuestPad(targetName, fromPos)
     return best, bestD
 end
 
--- Stand ON the Observation spawn pad (CFrame) so respawns / stream triggers work
+-- Locate waypoint above Observation spawn (travel only â€” never a farm perch)
 local function farmStandAtPad(padPos)
     if typeof(padPos) ~= "Vector3" then return nil end
-    return padPos + Vector3.new(0, 3, 0)
+    return padPos + Vector3.new(0, 4, 0)
 end
 
--- Preferred travel for ANY quest: Observation spawn CFrame first, always
+-- Travel goal to GET IN RANGE of targets (spawn pad / island). Not for fighting or AFK-wait.
 local function questTravelGoal(targetName)
     harvestObservationPads()
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
@@ -3819,9 +3822,7 @@ local function questTravelGoal(targetName)
     local pad = nearestQuestPad(targetName, from)
     if pad then
         cachePad(targetName, pad)
-        -- Exact spawn pad CFrame / position
-        local stand = farmStandAtPad(pad.pos)
-        return stand, "pad:" .. tostring(pad.name), pad.island
+        return farmStandAtPad(pad.pos), "locate:" .. tostring(pad.name), pad.island
     end
     local cached, ck, ci = cachedPadStand(targetName)
     if cached then
@@ -3847,10 +3848,10 @@ local function questTravelGoal(targetName)
         if island then
             local inland = placeStandFromInstance(island, "land:" .. tostring(spawn))
             if inland and (inland - stand).Magnitude > 60 then
-                return inland, "land:" .. tostring(spawn), spawn
+                return inland, "locate:" .. tostring(spawn), spawn
             end
         end
-        return stand, "island:" .. tostring(spawn or "?"), spawn
+        return stand, "locate:" .. tostring(spawn or "?"), spawn
     end
     return nil, nil, nil
 end
@@ -5384,14 +5385,14 @@ local function onFarmQuestChanged(targetName)
     _farmTrackedQuest = key
     clearFarmArena()
     requestFarmRepath()
-    -- Lock travel to this quest's Observation TP pad (or island if no pad)
+    -- Lock travel to spawn-area locator (pad/island) â€” locate only, not a farm perch
     local stand, kind, spawn = questTravelGoal(key)
     if stand then
         _farmIslandGoal = stand
         _farmIslandName = tostring(kind or spawn or key)
-        _farmIslandUntil = tick() + 45
+        _farmIslandUntil = tick() + 60
     end
-    State.status = "quest swap Â· " .. key
+    State.status = "locate Â· " .. key
     return true
 end
 
@@ -5562,46 +5563,70 @@ task.spawn(function()
                         clearFarmLock()
                         clearVirtualAim()
 
-                        local perch, perchKind, dist0 = nil, nil, nil
-                        if islandHopping and _farmIslandGoal then
-                            perch = _farmIslandGoal
-                            perchKind = tostring(_farmIslandName or "pad")
-                            dist0 = (hrp.Position - perch).Magnitude
-                        else
-                            -- Prefer Observation spawn pad CFrame while waiting for respawn
-                            local padStand, padKind = questTravelGoal(targetName)
-                            local waitStand, _, _, kind, d0 = questKillStand(targetName)
-                            if waitStand and kind and tostring(kind):sub(1, 4) == "npc:" then
-                                perch, perchKind, dist0 = waitStand, kind, d0
-                            elseif padStand then
-                                perch, perchKind = padStand, padKind
-                                dist0 = (hrp.Position - padStand).Magnitude
-                                _farmIslandGoal = padStand
-                                _farmIslandName = padKind
-                                _farmIslandUntil = tick() + 30
-                            elseif waitStand then
-                                perch, perchKind, dist0 = waitStand, kind, d0
+                        -- Spawn pads = LOCATE only. Never sit/farm on them.
+                        local LOCATE_ARRIVE = 80
+                        local LOCATE_REPATH = 160
+                        local locateStand, locateKind = questTravelGoal(targetName)
+                        local locateDist = locateStand and (hrp.Position - locateStand).Magnitude
+
+                        if locateStand and locateDist and locateDist > LOCATE_REPATH then
+                            if not (_farmIslandGoal and tick() < _farmIslandUntil) then
+                                _farmIslandGoal = locateStand
+                                _farmIslandName = tostring(locateKind or "locate")
+                                _farmIslandUntil = tick() + 60
                             end
-                            -- Never replace a spawn-pad wait with "last" (misses respawns)
-                            local kindStr = tostring(perchKind or "")
-                            local isPadWait = kindStr:sub(1, 4) == "pad:"
-                                or kindStr:sub(1, 6) == "cache:"
-                                or kindStr:sub(1, 6) == "arena:"
-                                or kindStr:sub(1, 4) == "obs:"
-                            local sameQuestLast = _lastCombatStand
+                        end
+
+                        local locating = _farmIslandGoal
+                            and tick() < _farmIslandUntil
+                            and typeof(_farmIslandGoal) == "Vector3"
+                        local perch, perchKind, dist0 = nil, nil, nil
+
+                        if locating then
+                            dist0 = (hrp.Position - _farmIslandGoal).Magnitude
+                            if dist0 < LOCATE_ARRIVE then
+                                -- Located spawn area â€” drop pad goal; only fight live NPCs from here
+                                _farmIslandGoal = nil
+                                _farmIslandName = nil
+                                locating = false
+                            else
+                                perch = _farmIslandGoal
+                                perchKind = tostring(_farmIslandName or "locate")
+                            end
+                        end
+
+                        if not locating then
+                            -- Wait for respawn at last fight spot (not on Observation pad)
+                            if _lastCombatStand
                                 and _lastCombatTarget == targetName
-                                and (tick() - _lastCombatAt) < 45
-                            if sameQuestLast and perch and not isPadWait then
-                                if flatDist(_lastCombatStand, perch) < 40
-                                    and math.abs(_lastCombatStand.Y - perch.Y) < 25
-                                then
-                                    perch = _lastCombatStand
-                                    perchKind = "last"
-                                end
+                                and (tick() - _lastCombatAt) < 120
+                            then
+                                perch = _lastCombatStand
+                                perchKind = "respawn"
+                                dist0 = (hrp.Position - perch).Magnitude
+                            elseif locateStand and locateDist and locateDist <= LOCATE_REPATH then
+                                -- In range of spawn area, scanning for live target
+                                stopFarmHold()
+                                State.status = string.format("scan Â· %s", tostring(targetName))
+                                perch = nil
+                            elseif locateStand then
+                                perch = locateStand
+                                perchKind = tostring(locateKind or "locate")
+                                dist0 = locateDist
+                                _farmIslandGoal = locateStand
+                                _farmIslandName = perchKind
+                                _farmIslandUntil = tick() + 60
+                            else
+                                stopFarmHold()
+                                State.status = "no locate Â· " .. tostring(targetName)
                             end
                         end
 
                         if perch then
+                            local isLocate = tostring(perchKind or ""):sub(1, 7) == "locate:"
+                                or tostring(perchKind or "") == "locate"
+                                or tostring(perchKind or ""):find("land:", 1, true) == 1
+                                or tostring(perchKind or ""):find("obs:", 1, true) == 1
                             local wf = flatDist(hrp.Position, perch)
                             local dy = hrp.Position.Y - perch.Y
                             local dist3 = (hrp.Position - perch).Magnitude
@@ -5611,13 +5636,14 @@ task.spawn(function()
                                 _forceFarmRepath = false
                                 local spd = dist3 > 2500 and 950 or (dist3 > 1200 and 850 or 700)
                                 State.status = string.format(
-                                    "pad Â· %s Â· %.0fd",
-                                    tostring(perchKind or "pad"),
+                                    "%s Â· %s Â· %.0fd",
+                                    isLocate and "locate" or "path",
+                                    tostring(perchKind or "?"),
                                     dist0 or dist3
                                 )
                                 local ok, _, cache = bvFlyTo(perch, {
                                     speed = spd,
-                                    arrive = 16,
+                                    arrive = isLocate and 22 or 16,
                                     keepNoclip = true,
                                     maxT = math.clamp(dist3 / math.max(200, spd) + 15, 20, 120),
                                     cancel = function()
@@ -5625,26 +5651,31 @@ task.spawn(function()
                                     end,
                                 })
                                 if cache then _farmNoclipCache = cache end
-                                if ok then
-                                    if _farmIslandGoal and (hrp.Position - _farmIslandGoal).Magnitude < 100 then
-                                        _farmIslandGoal = nil
-                                        _farmIslandName = nil
-                                    end
-                                else
+                                if ok and isLocate then
+                                    _farmIslandGoal = nil
+                                    _farmIslandName = nil
+                                elseif not ok then
                                     State.status = "travel fail Â· " .. tostring(targetName)
                                 end
+                            elseif isLocate then
+                                -- Still approaching locate point
+                                _questFlyToken = _questFlyToken + 1
+                                farmHoldAt(perch, perch, "travel")
+                                State.status = string.format(
+                                    "locate Â· %s Â· %s",
+                                    tostring(targetName),
+                                    tostring(perchKind or "pad")
+                                )
                             else
+                                -- Respawn wait at last combat â€” not on pad
                                 _questFlyToken = _questFlyToken + 1
                                 farmHoldAt(perch, perch, "travel")
                                 State.status = string.format(
                                     "wait Â· %s Â· %s",
                                     tostring(targetName),
-                                    tostring(perchKind or "pad")
+                                    tostring(perchKind or "respawn")
                                 )
                             end
-                        else
-                            stopFarmHold()
-                            State.status = "no pad Â· " .. tostring(targetName)
                         end
                     end
                 elseif not targetName then
